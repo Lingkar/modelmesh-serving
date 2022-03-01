@@ -25,8 +25,6 @@ jobs:
         run: make build.develop
       - name: Run lint
         run: ./scripts/develop.sh make fmt
-#      - name: Run unit tests
-#        run: ./scripts/develop.sh make test
       - name: Build runtime image
         run: make build
       - name: Log in to Docker Hub
