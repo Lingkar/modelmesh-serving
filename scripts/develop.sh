@@ -27,7 +27,7 @@ usage() {
   exit 1
 }
 
-REGISTRY="kserve"
+REGISTRY="janleo500"
 PARAMS=""
 CONTROLLER_IMG="modelmesh-controller"
 
