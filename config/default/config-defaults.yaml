@@ -15,8 +15,8 @@
 podsPerRuntime: 2
 headlessService: true
 modelMeshImage:
-  name: kserve/modelmesh
-  tag: v0.8.0
+  name: janleo500/modelmesh
+  tag: latest
 modelMeshResources:
   requests:
     cpu: "300m"
@@ -28,8 +28,8 @@ restProxy:
   enabled: true
   port: 8008
   image:
-    name: kserve/rest-proxy
-    tag: v0.1.3
+    name: janleo500/rest-proxy
+    tag: latest
   resources:
     requests:
       cpu: "50m"
@@ -38,8 +38,8 @@ restProxy:
       cpu: "1"
       memory: "512Mi"
 storageHelperImage:
-  name: kserve/modelmesh-runtime-adapter
-  tag: v0.8.0
+  name: janleo500/modelmesh-runtime-adapter
+  tag: latest
   command: ["/opt/app/puller"]
 storageHelperResources:
   requests:
