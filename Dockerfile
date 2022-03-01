@@ -28,8 +28,10 @@ COPY controllers/ controllers/
 COPY generated/ generated/
 COPY pkg/ pkg/
 
+ARG TARGETARCH
+
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -a -o manager main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GO111MODULE=on go build -a -o manager main.go
 
 ###############################################################################
 # Stage 2: Copy build assets to create the smallest final runtime image
@@ -39,6 +41,7 @@ FROM registry.access.redhat.com/ubi8/ubi-minimal:8.4 AS runtime
 ARG USER=2000
 ARG IMAGE_VERSION
 ARG COMMIT_SHA
+
 
 LABEL name="modelmesh-serving-controller" \
       version="${IMAGE_VERSION}" \
