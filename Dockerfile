@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG DEV_IMAGE
-
 ###############################################################################
 # Stage 1: Run the build
 ###############################################################################
-FROM ${DEV_IMAGE} AS build
+FROM janleo500/modelmesh-controller-develop:latest AS build
 
 LABEL image="build"
 
