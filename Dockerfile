@@ -42,7 +42,6 @@ ARG USER=2000
 ARG IMAGE_VERSION
 ARG COMMIT_SHA
 
-
 LABEL name="modelmesh-serving-controller" \
       version="${IMAGE_VERSION}" \
       release="${COMMIT_SHA}" \
