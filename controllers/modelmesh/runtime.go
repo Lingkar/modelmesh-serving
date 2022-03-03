@@ -297,7 +297,7 @@ func (m *Deployment) addPassThroughPodFieldsToDeployment(deployment *appsv1.Depl
 			{
 				Key:      "kubernetes.io/arch",
 				Operator: corev1.NodeSelectorOpIn,
-				Values:   []string{"amd64"},
+				Values:   []string{"amd64", "arm64"},
 			},
 		},
 	}
