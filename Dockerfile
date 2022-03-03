@@ -49,6 +49,7 @@ LABEL name="modelmesh-serving-controller" \
 USER ${USER}
 
 WORKDIR /
+
 COPY --from=build /workspace/manager .
 
 COPY config/internal config/internal
