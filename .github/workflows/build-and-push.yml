@@ -40,10 +40,9 @@ jobs:
 
           # Currently, we rely on nightly builds for pushing images, so exit if
           # not a tag version for now.
-          if [ "$VERSION" == "main" ]; then
+          if [ "$VERSION" == "main-thesis" ]; then
             echo "Skipping image push"
             VERSION=latest
-            exit 0
           fi
 
           docker tag ${{ env.IMAGE_NAME }}:latest ${{ env.IMAGE_NAME }}:$VERSION
