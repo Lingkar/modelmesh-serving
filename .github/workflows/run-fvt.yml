@@ -55,7 +55,7 @@ jobs:
           ./scripts/install.sh --namespace modelmesh-serving -u modelmesh-user --fvt --dev-mode-logging
       - name: Pre-pull runtime images
         run: |
-          docker pull nvcr.io/nvidia/tritonserver:21.06.1-py3
+          docker pull nvcr.io/nvidia/tritonserver:21.10-py3
           docker pull seldonio/mlserver:0.5.2
       - name: Check installation
         run: |
