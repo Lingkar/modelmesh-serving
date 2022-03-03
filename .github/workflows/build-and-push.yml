@@ -37,14 +37,14 @@ jobs:
           # Strip git ref prefix from version
           VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
           echo $VERSION
-          
-          DOCKER_IMAGE=${{ secrets.DOCKER_USER }}/modelmesh-controller
 
-          # Use Docker `latest` tag convention     
-          [ "$VERSION" == "main-thesis" ] && VERSION=latest
-          echo $VERSION
-          
-          TAGS="${DOCKER_IMAGE}:${VERSION}"
-          
-          docker tag ${TAGS}
-          docker push ${TAGS}
+          # Currently, we rely on nightly builds for pushing images, so exit if
+          # not a tag version for now.
+          if [ "$VERSION" == "main" ]; then
+            echo "Skipping image push"
+            VERSION=latest
+            exit 0
+          fi
+
+          docker tag ${{ env.IMAGE_NAME }}:latest ${{ env.IMAGE_NAME }}:$VERSION
+          docker push ${{ env.IMAGE_NAME }}:$VERSION
