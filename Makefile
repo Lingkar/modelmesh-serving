@@ -17,7 +17,7 @@ ifeq (run,$(firstword $(MAKECMDGOALS)))
 endif
 
 # Image URL to use all building/pushing image targets
-IMG ?= kserve/modelmesh-controller:latest
+IMG ?= janleo500/modelmesh-controller:latest
 # Namespace to deploy model-serve into
 NAMESPACE ?= "model-serving"
 

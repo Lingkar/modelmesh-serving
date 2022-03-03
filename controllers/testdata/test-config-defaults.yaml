@@ -37,7 +37,7 @@ restProxy:
   enabled: false
   port: 8008
   image:
-    name: kserve/rest-proxy
+    name: janleo500/rest-proxy
     tag: latest
   resources:
     requests:
