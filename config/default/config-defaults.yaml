@@ -65,5 +65,3 @@ storageHelperResources:
 serviceAccountName: ""
 metrics:
   enabled: true
-scaleToZero:
-  enabled: false
