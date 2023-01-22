@@ -16,25 +16,33 @@ package modelmesh
 import (
 	"testing"
 
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+	"github.com/kserve/kserve/pkg/constants"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestCalculateConstraintData(t *testing.T) {
 	expected := `{"_default":{"required":["_no_runtime"]},` +
-		`"mt:tensorflow":{"required":["mt:tensorflow"]},"mt:tensorflow:1.10":{"required":["mt:tensorflow:1.10"]},"rt:tf-serving-runtime":{"required":["rt:tf-serving-runtime"]}}`
+		`"mt:tensorflow":{"required":["mt:tensorflow"]},` +
+		`"mt:tensorflow:1.10":{"required":["mt:tensorflow:1.10"]},` +
+		`"mt:tensorflow:1.10|pv:v1":{"required":["mt:tensorflow:1.10","pv:v1"]},` +
+		`"mt:tensorflow:1.10|pv:v2":{"required":["mt:tensorflow:1.10","pv:v2"]},` +
+		`"mt:tensorflow|pv:v1":{"required":["mt:tensorflow","pv:v1"]},` +
+		`"mt:tensorflow|pv:v2":{"required":["mt:tensorflow","pv:v2"]},` +
+		`"rt:tf-serving-runtime":{"required":["rt:tf-serving-runtime"]}}`
+
 	v := "1.10"
 	v2 := "2"
 	a := true
 	mm := true
-	l := api.ServingRuntimeList{
-		Items: []api.ServingRuntime{
+	l := kserveapi.ServingRuntimeList{
+		Items: []kserveapi.ServingRuntime{
 			{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "tf-serving-runtime",
 				},
-				Spec: api.ServingRuntimeSpec{
-					SupportedModelFormats: []api.SupportedModelFormat{
+				Spec: kserveapi.ServingRuntimeSpec{
+					SupportedModelFormats: []kserveapi.SupportedModelFormat{
 						{
 							Name:       "tensorflow",
 							Version:    &v,
@@ -45,12 +53,16 @@ func TestCalculateConstraintData(t *testing.T) {
 							Version: &v2,
 						},
 					},
-					MultiModel: &mm,
+					ProtocolVersions: []constants.InferenceServiceProtocol{"v1", "v2"},
+					MultiModel:       &mm,
 				},
 			},
 		},
 	}
-	res := calculateConstraintData(l.Items)
+	srSpecs := make(map[string]*kserveapi.ServingRuntimeSpec)
+	srSpecs[l.Items[0].GetName()] = &l.Items[0].Spec
+
+	res := calculateConstraintData(srSpecs, false)
 
 	if string(res) != expected {
 		t.Errorf("%v did not match expected %v", string(res), expected)

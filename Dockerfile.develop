@@ -15,13 +15,13 @@
 ###############################################################################
 # Create the develop, test, and build environment
 ###############################################################################
-FROM registry.access.redhat.com/ubi8/ubi-minimal:8.4
+FROM registry.access.redhat.com/ubi8/ubi-minimal:8.7
 
-ARG GOLANG_VERSION=1.17.3
+ARG GOLANG_VERSION=1.18.9
 ARG OPENSHIFT_VERSION=4.9
-ARG KUSTOMIZE_VERSION=4.4.0
-ARG KUBEBUILDER_VERSION=v3.2.0
-ARG CONTROLLER_GEN_VERSION=v0.7.0
+ARG KUSTOMIZE_VERSION=4.5.2
+ARG KUBEBUILDER_VERSION=v3.3.0
+ARG CONTROLLER_GEN_VERSION=v0.8.0
 ENV PATH=/usr/local/go/bin:$PATH:/usr/local/kubebuilder/bin:
 
 USER root
@@ -81,3 +81,6 @@ RUN microdnf install \
     mkdir /tmp/controller-gen-tmp && cd /tmp/controller-gen-tmp \
     && go mod init tmp && go get sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION} \
     && rm -rf /tmp/controller-gen-tmp
+
+RUN go install github.com/onsi/ginkgo/v2/ginkgo
+ENV PATH=/root/go/bin/:$PATH

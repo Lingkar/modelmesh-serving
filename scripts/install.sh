@@ -44,7 +44,7 @@ function showHelp() {
   echo "Kubernetes namespaces."
   echo
   echo "Expects cluster-admin authority and Kube cluster access to be configured prior to running."
-  echo "Also requires Etcd secret 'model-serving-etcd' to be created in namespace already."
+  echo "Also requires etcd secret 'model-serving-etcd' to be created in namespace already."
 }
 
 die() {
@@ -220,24 +220,39 @@ else
 fi
 
 # Ensure the namespace is overridden for all the resources
-cd default
+pushd default
 kustomize edit set namespace "$namespace"
-cd ..
+popd
+pushd rbac/namespace-scope
+kustomize edit set namespace "$namespace"
+popd
+pushd rbac/cluster-scope
+kustomize edit set namespace "$namespace"
+popd
 
 # Clean up previous instances but do not fail if they do not exist
+cp dependencies/quickstart.yaml .
+sed -i.bak "s/etcd:2379/etcd.${namespace}:2379/g" quickstart.yaml
+cp dependencies/fvt.yaml .
+sed -i.bak "s/etcd:2379/etcd.${namespace}:2379/g" fvt.yaml
 if [[ $delete == "true" ]]; then
   info "Deleting any previous ModelMesh Serving instances and older CRD with serving.kserve.io api group name"
   kubectl delete crd/predictors.serving.kserve.io --ignore-not-found=true
   kubectl delete crd/servingruntimes.serving.kserve.io --ignore-not-found=true
+  kustomize build rbac/namespace-scope | kubectl delete -f - --ignore-not-found=true
+  if [[ $namespace_scope_mode != "true" ]]; then
+    kubectl delete crd/clusterservingruntimes.serving.kserve.io --ignore-not-found=true
+    kustomize build rbac/cluster-scope | kubectl delete -f - --ignore-not-found=true
+  fi
   kustomize build default | kubectl delete -f - --ignore-not-found=true
-  kubectl delete -f dependencies/quickstart.yaml --ignore-not-found=true
-  kubectl delete -f dependencies/fvt.yaml --ignore-not-found=true
+  kubectl delete -f quickstart.yaml --ignore-not-found=true
+  kubectl delete -f fvt.yaml --ignore-not-found=true
 fi
 
 # Quickstart resources
 if [[ $quickstart == "true" ]]; then
   info "Deploying quickstart resources for etcd and minio"
-  kubectl apply -f dependencies/quickstart.yaml
+  kubectl apply -f quickstart.yaml
 
   info "Waiting for dependent pods to be up..."
   wait_for_pods_ready "--field-selector metadata.name=etcd"
@@ -247,15 +262,15 @@ fi
 # FVT resources
 if [[ $fvt == "true" ]]; then
   info "Deploying fvt resources for etcd and minio"
-  kubectl apply -f dependencies/fvt.yaml
+  kubectl apply -f fvt.yaml
 
   info "Waiting for dependent pods to be up..."
-  wait_for_pods_ready "--field-selector metadata.name=etcd"
-  wait_for_pods_ready "--field-selector metadata.name=minio"
+  wait_for_pods_ready "-l app=etcd"
+  wait_for_pods_ready "-l app=minio"
 fi
 
 if ! kubectl get secret model-serving-etcd >/dev/null; then
-  die "Could not find Etcd kube secret 'model-serving-etcd'. This is a prerequisite for running ModelMesh Serving install."
+  die "Could not find etcd kube secret 'model-serving-etcd'. This is a prerequisite for running ModelMesh Serving install."
 else
   echo "model-serving-etcd secret found"
 fi
@@ -264,7 +279,17 @@ info "Creating storage-config secret if it does not exist"
 kubectl create -f default/storage-secret.yaml 2>/dev/null || :
 kubectl get secret storage-config
 
-info "Installing ModelMesh Serving CRDs, RBACs, and controller"
+info "Installing ModelMesh Serving RBACs (namespace_scope_mode=$namespace_scope_mode)"
+if [[ $namespace_scope_mode == "true" ]]; then
+  kustomize build rbac/namespace-scope | kubectl apply -f -
+  # We don't install the ClusterServingRuntime CRD when in namespace scope mode, so comment it out first in the CRD manifest file
+  sed -i.bak 's/- bases\/serving.kserve.io_clusterservingruntimes.yaml/#- bases\/serving.kserve.io_clusterservingruntimes.yaml/g' crd/kustomization.yaml
+  rm crd/kustomization.yaml.bak
+else
+  kustomize build rbac/cluster-scope | kubectl apply -f -
+fi
+
+info "Installing ModelMesh Serving CRDs and controller"
 kustomize build default | kubectl apply -f -
 
 if [[ $dev_mode_logging == "true" ]]; then
@@ -275,16 +300,32 @@ fi
 if [[ $namespace_scope_mode == "true" ]]; then
   info "Enabling namespace scope mode"
   kubectl set env deploy/modelmesh-controller NAMESPACE_SCOPE=true
+  # Reset crd/kustomization.yaml back to CSR crd since we used the same file for namespace scope mode installation
+  sed -i.bak 's/#- bases\/serving.kserve.io_clusterservingruntimes.yaml/- bases\/serving.kserve.io_clusterservingruntimes.yaml/g' crd/kustomization.yaml
+  rm crd/kustomization.yaml.bak
 fi
 
 info "Waiting for ModelMesh Serving controller pod to be up..."
 wait_for_pods_ready "-l control-plane=modelmesh-controller"
 
-info "Installing ModelMesh Serving built-in runtimes"
-kustomize build runtimes --load-restrictor LoadRestrictionsNone | kubectl apply -f -
+# Older versions of kustomize have different load restrictor flag formats.
+# Can be removed once Kubeflow installation stops requiring v3.2.
+kustomize_version=$(kustomize version --short | grep -o -E "[0-9]\.[0-9]\.[0-9]")
+kustomize_load_restrictor_arg="--load-restrictor LoadRestrictionsNone"
+if [[ -n "$kustomize_version" && "$kustomize_version" < "3.4.0" ]]; then
+    kustomize_load_restrictor_arg="--load_restrictor none"
+elif [[ -n "$kustomize_version" && "$kustomize_version" < "4.0.1" ]]; then
+    kustomize_load_restrictor_arg="--load_restrictor LoadRestrictionsNone"
+fi
 
-if [[ ! -z $user_ns_array ]]; then
-  kustomize build runtimes --load-restrictor LoadRestrictionsNone > runtimes.yaml
+info "Installing ModelMesh Serving built-in runtimes"
+if [[ $namespace_scope_mode == "true" ]]; then
+    kustomize build namespace-runtimes ${kustomize_load_restrictor_arg} | kubectl apply -f -
+else
+    kustomize build runtimes ${kustomize_load_restrictor_arg} | kubectl apply -f -
+fi
+
+if [[ $namespace_scope_mode != "true" ]] && [[ ! -z $user_ns_array ]]; then
   cp dependencies/minio-storage-secret.yaml .
   sed -i.bak "s/controller_namespace/${namespace}/g" minio-storage-secret.yaml
 
@@ -293,7 +334,6 @@ if [[ ! -z $user_ns_array ]]; then
       echo "Kube namespace does not exist: $user_ns. Will skip."
     else
       kubectl label namespace ${user_ns} modelmesh-enabled="true" --overwrite
-      kubectl apply -f runtimes.yaml -n ${user_ns}
       if ([ $quickstart == "true" ] || [ $fvt == "true" ]); then
         kubectl apply -f minio-storage-secret.yaml -n ${user_ns}
       fi
@@ -301,7 +341,7 @@ if [[ ! -z $user_ns_array ]]; then
   done
   rm minio-storage-secret.yaml
   rm minio-storage-secret.yaml.bak
-  rm runtimes.yaml
 fi
+rm quickstart.yaml quickstart.yaml.bak fvt.yaml fvt.yaml.bak
 
 success "Successfully installed ModelMesh Serving!"

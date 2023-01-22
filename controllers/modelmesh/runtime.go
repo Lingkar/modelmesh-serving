@@ -15,10 +15,11 @@ package modelmesh
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -26,19 +27,17 @@ import (
 )
 
 const (
-	modelsDirVolume string  = "models-dir"
-	socketVolume    string  = "domain-socket"
-	ModelsDir       string  = "/models"
-	ModelDirScale   float64 = 1.5
+	ModelsDir     string  = "/models"
+	ModelDirScale float64 = 1.5
 )
 
-//Sets the model mesh grace period to match the deployment grace period
+// Sets the model mesh grace period to match the deployment grace period
 func (m *Deployment) syncGracePeriod(deployment *appsv1.Deployment) error {
 	if deployment.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 		gracePeriodS := deployment.Spec.Template.Spec.TerminationGracePeriodSeconds
 		gracePeriodMs := *gracePeriodS * int64(1000)
 		gracePeriodMsStr := strconv.FormatInt(gracePeriodMs, 10)
-		err := setEnvironmentVar("mm", "SHUTDOWN_TIMEOUT_MS", gracePeriodMsStr, deployment)
+		err := setEnvironmentVar(ModelMeshContainerName, "SHUTDOWN_TIMEOUT_MS", gracePeriodMsStr, deployment)
 		return err
 	}
 
@@ -46,36 +45,30 @@ func (m *Deployment) syncGracePeriod(deployment *appsv1.Deployment) error {
 }
 
 func (m *Deployment) addVolumesToDeployment(deployment *appsv1.Deployment) error {
-	rt := m.Owner
-	modelsDirSize := calculateModelDirSize(rt)
+	rts := m.SRSpec
+	modelsDirSize := calculateModelDirSize(rts)
 
-	volumes := []corev1.Volume{
-		{
-			Name: modelsDirVolume,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{Medium: "", SizeLimit: modelsDirSize},
-			},
+	// start from the volumes specified in the runtime spec
+	volumes := rts.Volumes
+
+	volumes = append(volumes, corev1.Volume{
+		Name: ModelsDirVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: "", SizeLimit: modelsDirSize},
 		},
-	}
+	})
 
-	if hasUnixSockets, _, _ := unixDomainSockets(rt); hasUnixSockets {
+	if hasUnixSockets, _, _ := unixDomainSockets(rts); hasUnixSockets {
 		volumes = append(volumes, corev1.Volume{
-			Name: socketVolume,
+			Name: SocketVolume,
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		})
 	}
 
-	deployment.Spec.Template.Spec.Volumes = volumes
-
-	return nil
-}
-
-func (m *Deployment) addStorageConfigVolume(deployment *appsv1.Deployment) error {
-	rt := m.Owner
-	// need to mount storage volume for built-in adapters and the scenarios where StorageHelper is not disabled/specified.
-	if rt.Spec.BuiltInAdapter != nil || useStorageHelper(rt) {
+	// need to mount storage config for built-in adapters and the scenarios where StorageHelper is not disabled
+	if rts.BuiltInAdapter != nil || useStorageHelper(rts) {
 		storageVolume := corev1.Volume{
 			Name: ConfigStorageMount,
 			VolumeSource: corev1.VolumeSource{
@@ -85,38 +78,40 @@ func (m *Deployment) addStorageConfigVolume(deployment *appsv1.Deployment) error
 			},
 		}
 
-		deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, storageVolume)
+		volumes = append(volumes, storageVolume)
 	}
+
+	deployment.Spec.Template.Spec.Volumes = volumes
 
 	return nil
 }
 
 // calculate emptyDir Size
-func calculateModelDirSize(rt *api.ServingRuntime) *resource.Quantity {
+func calculateModelDirSize(rts *kserveapi.ServingRuntimeSpec) *resource.Quantity {
 
 	memorySize := resource.MustParse("0")
 
-	for _, cspec := range rt.Spec.Containers {
+	for _, cspec := range rts.Containers {
 		memorySize.Add(cspec.Resources.Limits[corev1.ResourceMemory])
 	}
 
 	return resource.NewQuantity(int64(float64(memorySize.Value())*ModelDirScale), resource.BinarySI)
 }
 
-//Adds the provided runtime to the deployment
+// Adds the provided runtime to the deployment
 func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error {
-	rt := m.Owner
+	rts := m.SRSpec
 
 	// first prepare the common variables needed for both adapter and other containers
 	lifecycle := &corev1.Lifecycle{
-		PreStop: &corev1.Handler{
+		PreStop: &corev1.LifecycleHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Path: "/prestop",
 				Port: intstr.FromInt(8090),
 			},
 		},
 	}
-	securityContext := &corev1.SecurityContext{
+	dropAllSecurityContext := &corev1.SecurityContext{
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 		},
@@ -124,46 +119,44 @@ func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error
 
 	volumeMounts := []corev1.VolumeMount{
 		{
-			Name:      modelsDirVolume,
+			Name:      ModelsDirVolume,
 			MountPath: ModelsDir,
 		},
 	}
 
 	// Now add the containers specified in serving runtime spec
-	for i := range rt.Spec.Containers {
-		cspec := &rt.Spec.Containers[i]
+	for i := range rts.Containers {
+		// by modifying in-place we rely on the fact that the cacheing
+		// client in controller-runtime deep copies objects it retrieves
+		// by default, this would be a problem if that was disabled
+		// REF: https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/cache
+		cspec := &rts.Containers[i]
 
-		//translate our container spec to corev1 container spec
-		corecspec := corev1.Container{
-			Args:            cspec.Args,
-			Command:         cspec.Command,
-			Env:             cspec.Env,
-			Image:           cspec.Image,
-			Name:            cspec.Name,
-			Resources:       cspec.Resources,
-			ImagePullPolicy: cspec.ImagePullPolicy,
-			WorkingDir:      cspec.WorkingDir,
-			LivenessProbe:   cspec.LivenessProbe,
-			VolumeMounts:    volumeMounts,
-			Lifecycle:       lifecycle,
-			SecurityContext: securityContext,
+		// defaults
+		if cspec.SecurityContext == nil {
+			cspec.SecurityContext = dropAllSecurityContext
 		}
 
-		if err := addDomainSocketMount(rt, &corecspec); err != nil {
+		// add internal fields
+		cspec.VolumeMounts = append(volumeMounts, cspec.VolumeMounts...)
+		cspec.Lifecycle = lifecycle
+
+		if err := addDomainSocketMount(rts, cspec); err != nil {
 			return err
 		}
 
+		// if multiple containers with the same name are included, the last one wins
 		if i, _ := findContainer(cspec.Name, deployment); i >= 0 {
-			deployment.Spec.Template.Spec.Containers[i] = corecspec
+			deployment.Spec.Template.Spec.Containers[i] = *cspec
 		} else {
-			deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, corecspec)
+			deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, *cspec)
 		}
 	}
 
-	if rt.Spec.BuiltInAdapter != nil {
+	if rts.BuiltInAdapter != nil {
 		// BuiltInAdapter is specified, so prepare adapter container
 		// Validation is already happened in reconcile logic, so just append "-adapter" to runtimeName for adapterName
-		runtimeName := string(rt.Spec.BuiltInAdapter.ServerType)
+		runtimeName := string(rts.BuiltInAdapter.ServerType)
 		runtimeAdapterName := runtimeName + "-adapter"
 
 		builtInAdapterContainer := corev1.Container{
@@ -171,7 +164,7 @@ func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error
 			Image:           m.PullerImage,
 			Name:            runtimeAdapterName,
 			Lifecycle:       lifecycle,
-			SecurityContext: securityContext,
+			SecurityContext: dropAllSecurityContext,
 		}
 
 		var runtimeVersion string
@@ -182,7 +175,7 @@ func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error
 		} else {
 			m.Log.Error(nil, "ServingRuntime uses built-in adapter"+
 				" but does not include a container with the name of the specified server type",
-				"servingRuntime", m.Owner.Name, "serverType", runtimeName)
+				"servingRuntime", m.Name, "serverType", runtimeName)
 		}
 
 		// the puller and adapter containers are the same image and are given the
@@ -195,14 +188,37 @@ func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error
 			ReadOnly:  true,
 		})
 
+		var rtDataEndpoint string
+		if rts.GrpcDataEndpoint != nil {
+			rtDataEndpoint = *rts.GrpcDataEndpoint
+			if err := addDomainSocketMount(rts, &builtInAdapterContainer); err != nil {
+				return err
+			}
+		} else {
+			rtDataEndpoint = fmt.Sprintf("port:%d", rts.BuiltInAdapter.RuntimeManagementPort)
+		}
+
+		adapterPort := "8085"
+		if rts.GrpcMultiModelManagementEndpoint != nil {
+			ep := *rts.GrpcMultiModelManagementEndpoint
+			if match, _ := regexp.MatchString("^port:[0-9]+$", ep); !match {
+				return fmt.Errorf("Built-in adapter grpcEndpoint must be of the form \"port:N\": %s", ep)
+			}
+			adapterPort = strings.TrimPrefix(ep, "port:")
+		}
+
 		builtInAdapterContainer.Env = []corev1.EnvVar{
 			{
 				Name:  "ADAPTER_PORT",
-				Value: "8085",
+				Value: adapterPort,
 			},
 			{
 				Name:  "RUNTIME_PORT",
-				Value: strconv.Itoa(rt.Spec.BuiltInAdapter.RuntimeManagementPort),
+				Value: strconv.Itoa(rts.BuiltInAdapter.RuntimeManagementPort),
+			},
+			{
+				Name:  "RUNTIME_DATA_ENDPOINT",
+				Value: rtDataEndpoint,
 			},
 			{
 				Name: "CONTAINER_MEM_REQ_BYTES",
@@ -215,11 +231,11 @@ func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error
 			},
 			{
 				Name:  "MEM_BUFFER_BYTES",
-				Value: strconv.Itoa(rt.Spec.BuiltInAdapter.MemBufferBytes),
+				Value: strconv.Itoa(rts.BuiltInAdapter.MemBufferBytes),
 			},
 			{
 				Name:  "LOADTIME_TIMEOUT",
-				Value: strconv.Itoa(rt.Spec.BuiltInAdapter.ModelLoadingTimeoutMillis),
+				Value: strconv.Itoa(rts.BuiltInAdapter.ModelLoadingTimeoutMillis),
 			},
 			{
 				Name:  "USE_EMBEDDED_PULLER",
@@ -229,36 +245,45 @@ func (m *Deployment) addRuntimeToDeployment(deployment *appsv1.Deployment) error
 				Name:  "RUNTIME_VERSION",
 				Value: runtimeVersion,
 			},
-			{}, {}, // allocate larger array to avoid reallocation
-		}[:7]
+			{}, {}, {}, {}, // allocate larger array to avoid reallocation
+		}[:8]
 
-		if mlc, ok := rt.Annotations["maxLoadingConcurrency"]; ok {
+		if mlc, ok := m.Owner.GetAnnotations()["maxLoadingConcurrency"]; ok {
 			builtInAdapterContainer.Env = append(builtInAdapterContainer.Env, corev1.EnvVar{
 				Name:  "LOADING_CONCURRENCY",
 				Value: mlc,
 			})
 		}
 
-		if pmcl, ok := rt.Annotations["perModelConcurrencyLimit"]; ok {
+		if pmcl, ok := m.Owner.GetAnnotations()["perModelConcurrencyLimit"]; ok {
 			builtInAdapterContainer.Env = append(builtInAdapterContainer.Env, corev1.EnvVar{
 				Name:  "LIMIT_PER_MODEL_CONCURRENCY",
 				Value: pmcl,
 			})
 		}
-
+	outer:
+		for oidx := range rts.BuiltInAdapter.Env {
+			for eidx := range builtInAdapterContainer.Env {
+				if builtInAdapterContainer.Env[eidx].Name == rts.BuiltInAdapter.Env[oidx].Name {
+					builtInAdapterContainer.Env[eidx] = rts.BuiltInAdapter.Env[oidx]
+					continue outer
+				}
+			}
+			builtInAdapterContainer.Env = append(builtInAdapterContainer.Env, rts.BuiltInAdapter.Env[oidx])
+		}
 		deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, builtInAdapterContainer)
 	}
 
 	return nil
 }
 
-func addDomainSocketMount(rt *api.ServingRuntime, c *corev1.Container) error {
+func addDomainSocketMount(rts *kserveapi.ServingRuntimeSpec, c *corev1.Container) error {
 	var requiresDomainSocketMounting bool
 	var domainSocketMountPoint string
 	endpoints := []*string{
-		rt.Spec.GrpcDataEndpoint,
-		//		rt.Spec.HTTPDataEndpoint,
-		rt.Spec.GrpcMultiModelManagementEndpoint,
+		rts.GrpcDataEndpoint,
+		//		rts.HTTPDataEndpoint,
+		rts.GrpcMultiModelManagementEndpoint,
 	}
 	for _, endpointStr := range endpoints {
 		if endpointStr != nil {
@@ -279,7 +304,7 @@ func addDomainSocketMount(rt *api.ServingRuntime, c *corev1.Container) error {
 	}
 	if requiresDomainSocketMounting {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-			Name:      socketVolume,
+			Name:      SocketVolume,
 			MountPath: domainSocketMountPoint,
 		})
 	}
@@ -288,10 +313,10 @@ func addDomainSocketMount(rt *api.ServingRuntime, c *corev1.Container) error {
 }
 
 func (m *Deployment) addPassThroughPodFieldsToDeployment(deployment *appsv1.Deployment) error {
-	rt := m.Owner
+	rts := m.SRSpec
 	// these fields map directly to pod spec fields
-	deployment.Spec.Template.Spec.NodeSelector = rt.Spec.NodeSelector
-	deployment.Spec.Template.Spec.Tolerations = rt.Spec.Tolerations
+	deployment.Spec.Template.Spec.NodeSelector = rts.NodeSelector
+	deployment.Spec.Template.Spec.Tolerations = rts.Tolerations
 	archNodeSelector := corev1.NodeSelectorTerm{
 		MatchExpressions: []corev1.NodeSelectorRequirement{
 			{
@@ -301,8 +326,8 @@ func (m *Deployment) addPassThroughPodFieldsToDeployment(deployment *appsv1.Depl
 			},
 		},
 	}
-	deployment.Spec.Template.Spec.Affinity = rt.Spec.Affinity
-	if rt.Spec.Affinity == nil {
+	deployment.Spec.Template.Spec.Affinity = rts.Affinity
+	if rts.Affinity == nil {
 		deployment.Spec.Template.Spec.Affinity = &corev1.Affinity{
 			NodeAffinity: &corev1.NodeAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
@@ -312,7 +337,7 @@ func (m *Deployment) addPassThroughPodFieldsToDeployment(deployment *appsv1.Depl
 				},
 			},
 		}
-	} else if rt.Spec.Affinity.NodeAffinity == nil {
+	} else if rts.Affinity.NodeAffinity == nil {
 		deployment.Spec.Template.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 				NodeSelectorTerms: []corev1.NodeSelectorTerm{
@@ -320,16 +345,41 @@ func (m *Deployment) addPassThroughPodFieldsToDeployment(deployment *appsv1.Depl
 				},
 			},
 		}
-	} else if rt.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+	} else if rts.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
 		deployment.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{
 				archNodeSelector,
 			},
 		}
 	} else {
-		nodeSelectors := rt.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+		nodeSelectors := rts.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
 		deployment.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms = append(nodeSelectors, archNodeSelector)
 	}
+
+	return nil
+}
+
+func (m *Deployment) configureRuntimePodSpecAnnotations(deployment *appsv1.Deployment) error {
+	// merging the annotations
+	// priority: ServingRuntimePodSpec > AnnotationsMap > whatever in the deployment template
+	deployment.Spec.Template.Annotations = Union(deployment.Spec.Template.Annotations, m.AnnotationsMap, m.SRSpec.ServingRuntimePodSpec.Annotations)
+	return nil
+}
+
+func (m *Deployment) configureRuntimePodSpecLabels(deployment *appsv1.Deployment) error {
+	// merging the labels
+	// priority: ServingRuntimePodSpec > LabelsMap > whatever in the deployment template
+	deployment.Spec.Template.Labels = Union(deployment.Spec.Template.Labels, m.LabelsMap, m.SRSpec.ServingRuntimePodSpec.Labels)
+	return nil
+}
+
+func (m *Deployment) configureRuntimePodSpecImagePullSecrets(deployment *appsv1.Deployment) error {
+	// merging the image pull secrets from deploymentTemplate (if any), configMap and ServingRuntimePodSpec
+	deployment.Spec.Template.Spec.ImagePullSecrets = mergeImagePullSecrets(
+		deployment.Spec.Template.Spec.ImagePullSecrets,
+		m.ImagePullSecrets,
+		m.SRSpec.ServingRuntimePodSpec.ImagePullSecrets,
+	)
 
 	return nil
 }

@@ -18,15 +18,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
 func TestAddMMDomainSocketMount(t *testing.T) {
 	path := "unix:///var/mount/path"
-	rt := &api.ServingRuntime{
-		Spec: api.ServingRuntimeSpec{
+	rt := &kserveapi.ServingRuntime{
+		Spec: kserveapi.ServingRuntimeSpec{
 			GrpcDataEndpoint: &path,
 		},
 	}
@@ -44,7 +44,7 @@ func TestAddMMDomainSocketMount(t *testing.T) {
 		},
 	}
 
-	m := Deployment{Owner: rt}
+	m := Deployment{Owner: rt, SRSpec: &rt.Spec}
 	err := m.addMMDomainSocketMount(deployment)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestAddMMDomainSocketMount(t *testing.T) {
 }
 
 func TestEnableAccessLogging(t *testing.T) {
-	rt := &api.ServingRuntime{}
+	rt := &kserveapi.ServingRuntime{}
 	d := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
@@ -69,7 +69,7 @@ func TestEnableAccessLogging(t *testing.T) {
 			},
 		},
 	}}
-	m := &Deployment{Owner: rt, EnableAccessLogging: true}
+	m := &Deployment{Owner: rt, EnableAccessLogging: true, SRSpec: &rt.Spec}
 	m.addMMEnvVars(d)
 
 	if _, c := findContainer("mm", d); c == nil {
@@ -85,8 +85,8 @@ func TestEnableAccessLogging(t *testing.T) {
 }
 
 func TestSetConfigMap(t *testing.T) {
-	rt := &api.ServingRuntime{}
-	m := Deployment{Owner: rt}
+	rt := &kserveapi.ServingRuntime{}
+	m := Deployment{Owner: rt, SRSpec: &rt.Spec}
 
 	err := m.setConfigMap()
 	assert.Nil(t, err)
@@ -94,7 +94,7 @@ func TestSetConfigMap(t *testing.T) {
 }
 
 func TestModelMeshAdditionalEnvVars(t *testing.T) {
-	rt := &api.ServingRuntime{}
+	rt := &kserveapi.ServingRuntime{}
 	d := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
@@ -108,7 +108,7 @@ func TestModelMeshAdditionalEnvVars(t *testing.T) {
 	}}
 	m := &Deployment{Owner: rt, ModelMeshAdditionalEnvVars: []corev1.EnvVar{
 		{Name: "ENV_VAR", Value: "0"},
-	}}
+	}, SRSpec: &rt.Spec}
 	m.addMMEnvVars(d)
 
 	if _, c := findContainer("mm", d); c == nil {

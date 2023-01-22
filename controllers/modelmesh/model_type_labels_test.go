@@ -14,23 +14,26 @@
 package modelmesh
 
 import (
-	"strings"
+	"reflect"
+	"sort"
 	"testing"
 
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+	"github.com/kserve/kserve/pkg/constants"
 	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestGetServingRuntimeSupportedModelTypeLabelSet(t *testing.T) {
+func TestGetServingRuntimeLabelSets(t *testing.T) {
 	version_semver := "12345.312.2"
 	version_someString := "someString"
 	autoSelectVal := true
-	rt := api.ServingRuntime{
+	rt := kserveapi.ServingRuntime{
 		ObjectMeta: v1.ObjectMeta{
 			Name: "runtimename",
 		},
-		Spec: api.ServingRuntimeSpec{
-			SupportedModelFormats: []api.SupportedModelFormat{
+		Spec: kserveapi.ServingRuntimeSpec{
+			SupportedModelFormats: []kserveapi.SupportedModelFormat{
 				{
 					Name:       "type1",
 					AutoSelect: &autoSelectVal,
@@ -52,26 +55,37 @@ func TestGetServingRuntimeSupportedModelTypeLabelSet(t *testing.T) {
 					Name: "type3",
 				},
 			},
+			ProtocolVersions: []constants.InferenceServiceProtocol{
+				"v1", "v2",
+			},
 		},
 	}
 
-	expectedLabels := []string{
+	expectedMtLabels := []string{
 		"mt:type1",
 		"mt:type2",
 		"mt:type2:" + version_semver,
 		"mt:type2:" + version_someString,
-		//runtime
-		"rt:runtimename",
 	}
+	sort.Strings(expectedMtLabels)
 
-	labelSet := GetServingRuntimeSupportedModelTypeLabelSet(&rt)
-	if len(labelSet) != len(expectedLabels) {
-		t.Errorf("Length of set %v should be %d, but got %d", labelSet, len(expectedLabels), len(labelSet))
+	expectedPvLabels := []string{
+		"pv:v1",
+		"pv:v2",
 	}
-	for _, e := range expectedLabels {
-		if !labelSet.Contains(e) {
-			t.Errorf("Missing expected entry [%s] in set: %v", e, labelSet)
-		}
+	sort.Strings(expectedPvLabels)
+
+	expectedRtLabel := "rt:runtimename"
+
+	mtLabelSet, pvLabelSet, rtLabel := GetServingRuntimeLabelSets(&rt.Spec, false, rt.Name)
+	if expectedRtLabel != rtLabel {
+		t.Errorf("Missing expected entry [%s] in set: %v", expectedRtLabel, rtLabel)
+	}
+	if !reflect.DeepEqual(mtLabelSet.List(), expectedMtLabels) {
+		t.Errorf("Labels [%s] don't match expected: %v", mtLabelSet.List(), expectedMtLabels)
+	}
+	if !reflect.DeepEqual(pvLabelSet.List(), expectedPvLabels) {
+		t.Errorf("Labels [%s] don't match expected: %v", pvLabelSet.List(), expectedPvLabels)
 	}
 }
 
@@ -123,82 +137,10 @@ func TestGetPredictorModelTypeLabel(t *testing.T) {
 			p := api.Predictor{
 				Spec: tt.spec,
 			}
-			label := GetPredictorModelTypeLabel(&p)
+			label := GetPredictorTypeLabel(&p)
 			if label != tt.expectedLabel {
 				t.Errorf("Got wrong predictor label, expected [%s], got [%s]", tt.expectedLabel, label)
 			}
 		})
-	}
-}
-
-func makeStringSet(input []string) StringSet {
-	ss := make(StringSet, len(input))
-	for _, s := range input {
-		ss.Add(s)
-	}
-	return ss
-}
-
-func TestStringSetContains(t *testing.T) {
-	inputs := []string{"cat", "frog", "aardvark", "aardvark", "aardvark"}
-	ss := makeStringSet(inputs)
-
-	// should contain these
-	if !ss.Contains("cat") {
-		t.Errorf("Missing expected entry [cat] in set: %v", ss)
-	}
-	if !ss.Contains("aardvark") {
-		t.Errorf("Missing expected entry [aardvark] in set: %v", ss)
-	}
-	if !ss.Contains("frog") {
-		t.Errorf("Missing expected entry [frog] in set: %v", ss)
-	}
-	// and not contain these
-	if ss.Contains("billy goat") {
-		t.Errorf("Unexpected entry [billy goat] in set: %v", ss)
-	}
-	if ss.Contains(".") {
-		t.Errorf("Unexpected entry [.] in set: %v", ss)
-	}
-}
-
-func TestStringSetToSlice(t *testing.T) {
-	inputs := []string{"c", "f", "a", "a", "f", "a"}
-	ss := makeStringSet(inputs)
-
-	hasC := false
-	hasF := false
-	hasA := false
-
-	ssSlice := ss.ToSlice()
-
-	for i, s := range ssSlice {
-		// each entry should only show up once
-		if s == "c" && !hasC {
-			hasC = true
-			continue
-		}
-		if s == "f" && !hasF {
-			hasF = true
-			continue
-		}
-		if s == "a" && !hasA {
-			hasA = true
-			continue
-		}
-		t.Errorf("Unexpected entry in ToSlice at index %d: %v", i, ssSlice)
-	}
-	if !hasC || !hasA || !hasF {
-		t.Errorf("Missing expected entry in ToSlice: %v", ssSlice)
-	}
-
-	// test that the order of entries in ToSlice is consistent
-	expected := strings.Join(ss.ToSlice(), ",")
-	for i := 1; i <= 20; i++ {
-		ssNew := makeStringSet(inputs)
-		got := strings.Join(ssNew.ToSlice(), ",")
-		if got != expected {
-			t.Fatalf("Expected order of ToSlice to result in %v but got %v", expected, got)
-		}
 	}
 }

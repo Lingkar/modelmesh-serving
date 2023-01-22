@@ -131,7 +131,7 @@ The `modelKey` field will contain a JSON string with the following contents:
 }
 ```
 
-Where `model_type` is the `modelType` section from the originating [`Predictor`](../predictors) custom resource. Note that `version` is optional and may not be present. In future, additional attributes might be present in the outer json object so your implementation should ignore them gracefully.
+Where `model_type` corresponds to the `modelFormat` section from the originating [`InferenceSerivce` predictor](../predictors). Note that `version` is optional and may not be present. In future, additional attributes might be present in the outer json object so your implementation should ignore them gracefully.
 
 The response shouldn't be returned until the model has loaded successfully and is ready to use.
 
@@ -189,7 +189,7 @@ metadata:
   name: example-runtime
 spec:
   supportedModelFormats:
-    - name: new-modeltype
+    - name: new-modelformat
       version: "1"
       autoSelect: true
   containers:
@@ -200,8 +200,8 @@ spec:
   grpcDataEndpoint: "port:8090"
 ```
 
-In each entry of the `supportedModelFormats` list, `autoSelect: true` can optionally be specified to indicate that that the given `ServingRuntime` can be considered for automatic placement of `Predictors` or `InferenceServices` with the corresponding model type/format if no runtime is explicitly specified.
-For example, if a user applies a `Predictor` with `modelType.name: new-modeltype` and no `runtime` value, the above `ServingRuntime` will be used since it contains an "auto-selectable" supported model format that matches `new-modeltype`. If `autoSelect` were `false` or unspecified, the `Predictor` would fail to load with the message "No ServingRuntime supports specified model type" unless the runtime `example-runtime` was specified directly in the YAML.
+In each entry of the `supportedModelFormats` list, `autoSelect: true` can optionally be specified to indicate that that the given `ServingRuntime` can be considered for automatic placement of `InferenceService`s with the corresponding model type/format if no runtime is explicitly specified.
+For example, if a user applies an `InferenceService` with `predictor.model.modelFormat.name: new-modelformat` and no `runtime` value, the above `ServingRuntime` will be used since it contains an "auto-selectable" supported model format that matches `new-modelformat`. If `autoSelect` were `false` or unspecified, the `InferenceService` would fail to load with the message "No `ServingRuntime` supports specified model type and/or protocol" unless the runtime `example-runtime` was specified directly in the YAML.
 
 ### Runtime container resource allocations
 
@@ -213,7 +213,7 @@ The ability to specify multiple containers provides a nice way to integrate with
 
 ![Custom with puller](../images/rt-custom-direct.png)
 
-_Note: In the above diagram, only the adapter and model server containers are explicitly specified in the ServingRuntime CR, the others are included automatically._
+_Note: In the above diagram, only the adapter and model server containers are explicitly specified in the `ServingRuntime` CR, the others are included automatically._
 
 The [built-in runtimes](https://github.com/kserve/modelmesh-serving/tree/main/config/runtimes) based on [Nvidia's Triton Inferencing Server](https://github.com/kserve/modelmesh-serving/blob/main/config/runtimes/triton-2.x.yaml) and the [Seldon MLServer](https://github.com/SeldonIO/MLServer), and their corresponding adapters serve as good examples of this and can be used as a reference.
 
@@ -225,7 +225,7 @@ Available attributes in the `ServingRuntime` spec:
 
 | Attribute                          | Description                                                                                                                                                               |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `multiModel`                       | Whether this ServingRuntime is ModelMesh-compatible and intended for multi-model usage (as opposed to KServe single-model serving).                                       |
+| `multiModel`                       | Whether this `ServingRuntime` is ModelMesh-compatible and intended for multi-model usage (as opposed to KServe single-model serving).                                     |
 | `disabled`                         | Disables this runtime                                                                                                                                                     |
 | `containers`                       | List of containers associated with the runtime                                                                                                                            |
 | `containers[ ].image`              | The container image for the current container                                                                                                                             |
@@ -243,7 +243,7 @@ Available attributes in the `ServingRuntime` spec:
 | `nodeSelector`                     | Influence Kubernetes scheduling to [assign pods to nodes](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/)                                       |
 | `affinity`                         | Influence Kubernetes scheduling to [assign pods to nodes](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity)            |
 | `tolerations`                      | Allow pods to be scheduled onto nodes [with matching taints](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration)                                |
-| `replicas`                         | The number of replicas of the runtime to create. This overrides the `podsPerRuntime` [configuration](configuration)                                                       |
+| `replicas`                         | The number of replicas of the runtime to create. This overrides the `podsPerRuntime` [configuration](/docs/configuration/README.md)                                       |
 
 ### Endpoint formats
 
@@ -268,7 +268,7 @@ metadata:
   name: example-runtime
 spec:
   supportedModelFormats:
-    - name: my_model_type # name of the model
+    - name: my_model_format # name of the model
       version: "1"
       autoSelect: true
   containers:
@@ -322,67 +322,71 @@ Storage helper will download the model from the S3 bucket using the secret `stor
 
 #### Example
 
-Consider the custom runtime defined [above](#full-example) with the following predictor:
+Consider the custom runtime defined [above](#full-example) with the following `InferenceService`:
 
 ```yaml
-apiVersion: serving.kserve.io/v1alpha1
-kind: Predictor
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
 metadata:
-  name: my-mnist-predictor
+  name: my-mnist-isvc
+  annotations:
+    serving.kserve.io/deploymentMode: ModelMesh
 spec:
-  modelType:
-    name: my_model_type
-    version: "1"
-  path: my_models/mnist-model
-  storage:
-    s3:
-      secretKey: my_storage
-      bucket: my_bucket
+  predictor:
+    model:
+      modelFormat:
+        name: my_model_format
+        version: "1"
+      storage:
+        key: my_storage
+        path: my_models/mnist-model
+        parameters:
+          bucket: my_bucket
 ```
 
 If the storage helper is enabled, the model serving container will receive the below model metadata in the `loadModel` call where `modelPath` will contain the path of the model in the local file system.
 
 ```json
 {
-  "modelId": "my-mnist-predictor-<suffix>",
-  "modelType": "my_model_type",
-  "modelPath": "/models/my-mnist-predictor-<suffix>/",
+  "modelId": "my-mnist-isvc-<suffix>",
+  "modelType": "my_model_format",
+  "modelPath": "/models/my-mnist-isvc-<suffix>/",
   "modelKey": "<serialized metadata as JSON, see below>"
 }
 ```
 
-The following metadata for the predictor is serialized to a string and embedded as the `modelKey` field:
+The following metadata for the `InferenceService` predictor is serialized to a string and embedded as the `modelKey` field:
 
 ```json
 {
   "bucket": "my_bucket",
   "disk_size_bytes": 2415,
   "model_type": {
-    "name": "my_model_type",
+    "name": "my_model_format",
     "version": "1"
   },
   "storage_key": "my_storage"
 }
 ```
 
-If the storage helper is disabled, the model serving container will receive the below model metadata in the `loadModel` call where `modelPath` is same as the `path` provided in the predictor CR.
+If the storage helper is disabled, the model serving container will receive the below model metadata in the `loadModel` call where `modelPath` is same as the `path` provided in the predictor storage spec.
 
 ```json
 {
-  "modelId": "my-mnist-predictor-<suffix>",
-  "modelType": "my_model_type",
+  "modelId": "my-mnist-isvc-<suffix>",
+  "modelType": "my_model_format",
   "modelPath": "my_models/mnist-model",
   "modelKey": "<serialized metadata as JSON, see below>"
 }
 ```
 
-The following metadata for the predictor is serialized to a string and embedded as the `modelKey` field:
+The following metadata for the `InferenceService` predictor is serialized to a string and embedded as the `modelKey` field:
 
 ```json
 {
   "bucket": "my_bucket",
   "model_type": {
-    "name": "my_model_type",
+    "name": "my_model_format",
     "version": "1"
   },
   "storage_key": "my_storage"

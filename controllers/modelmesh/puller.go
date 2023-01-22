@@ -16,7 +16,7 @@ package modelmesh
 import (
 	"strconv"
 
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -25,14 +25,14 @@ import (
 
 var StorageSecretName string
 
-func addPullerTransform(rt *api.ServingRuntime, pullerImage string, pullerImageCommand []string, pullerResources *corev1.ResourceRequirements) func(*unstructured.Unstructured) error {
+func addPullerTransform(rts *kserveapi.ServingRuntimeSpec, pullerImage string, pullerImageCommand []string, pullerResources *corev1.ResourceRequirements) func(*unstructured.Unstructured) error {
 	return func(resource *unstructured.Unstructured) error {
 		var deployment = &appsv1.Deployment{}
 		if err := scheme.Scheme.Convert(resource, deployment, nil); err != nil {
 			return err
 		}
 
-		err := addPullerSidecar(rt, deployment, pullerImage, pullerImageCommand, pullerResources)
+		err := addPullerSidecar(rts, deployment, pullerImage, pullerImageCommand, pullerResources)
 		if err != nil {
 			return err
 		}
@@ -41,8 +41,8 @@ func addPullerTransform(rt *api.ServingRuntime, pullerImage string, pullerImageC
 	}
 }
 
-func addPullerSidecar(rt *api.ServingRuntime, deployment *appsv1.Deployment, pullerImage string, pullerImageCommand []string, pullerResources *corev1.ResourceRequirements) error {
-	endpoint, err := ValidateEndpoint(*rt.Spec.GrpcMultiModelManagementEndpoint)
+func addPullerSidecar(rts *kserveapi.ServingRuntimeSpec, deployment *appsv1.Deployment, pullerImage string, pullerImageCommand []string, pullerResources *corev1.ResourceRequirements) error {
+	endpoint, err := ValidateEndpoint(*rts.GrpcMultiModelManagementEndpoint)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func addPullerSidecar(rt *api.ServingRuntime, deployment *appsv1.Deployment, pul
 			},
 		},
 		Image:   pullerImage,
-		Name:    PullerContainer,
+		Name:    PullerContainerName,
 		Command: pullerImageCommand,
 		Ports: []corev1.ContainerPort{
 			{
@@ -81,7 +81,7 @@ func addPullerSidecar(rt *api.ServingRuntime, deployment *appsv1.Deployment, pul
 		Resources: *pullerResources,
 		VolumeMounts: []corev1.VolumeMount{
 			{
-				Name:      modelsDirVolume,
+				Name:      ModelsDirVolume,
 				MountPath: PullerModelPath,
 			},
 			{

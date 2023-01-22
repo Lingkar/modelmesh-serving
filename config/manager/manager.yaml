@@ -21,13 +21,11 @@ spec:
   selector:
     matchLabels:
       control-plane: modelmesh-controller
-  replicas: 1
+  replicas: 1 # This can be increased safely to enable HA. A good value to set is 3.
   template:
     metadata:
       labels:
         control-plane: modelmesh-controller
-        # Required in Watson Cloud envs to allow outbound access to etcd
-        network-policy: allow-egress
     spec:
       affinity:
         nodeAffinity:
@@ -38,6 +36,17 @@ spec:
                     operator: In
                     values:
                       - amd64
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: control-plane
+                      operator: In
+                      values:
+                        - modelmesh-controller
+                topologyKey: topology.kubernetes.io/zone
       containers:
         - command:
             - /manager
@@ -72,7 +81,7 @@ spec:
               cpu: "1"
               memory: 512Mi
           volumeMounts:
-            - mountPath: /etc/model-serving/config-defaults.yaml
+            - mountPath: /etc/model-serving/config/default
               name: config-defaults
               readOnly: true
           securityContext:

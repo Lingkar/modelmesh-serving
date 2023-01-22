@@ -16,12 +16,17 @@ ifeq (run,$(firstword $(MAKECMDGOALS)))
   RUN_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 endif
 
+# Container Engine to be used for building images
+ENGINE ?= "docker"
+
 # Image URL to use all building/pushing image targets
 IMG ?= janleo500/modelmesh-controller:latest
 # Namespace to deploy model-serve into
 NAMESPACE ?= "model-serving"
 
 CONTROLLER_GEN_VERSION ?= "v0.7.0"
+
+CRD_OPTIONS ?= "crd:maxDescLen=0"
 
 # Model Mesh gRPC API Proto Generation
 PROTO_FILES = $(shell find proto/ -iname "*.proto")
@@ -40,9 +45,9 @@ all: manager
 test:
 	go test -coverprofile cover.out `go list ./... | grep -v fvt`
 
-# Run fvt tests. This requires an etcd, kubernetes connection, and model serving installation
+# Run fvt tests. This requires an etcd, kubernetes connection, and model serving installation. Ginkgo CLI is used to run them in parallel
 fvt:
-	go test -v ./fvt -ginkgo.v -ginkgo.progress -ginkgo.failFast -test.timeout 40m
+	ginkgo -v -p -progress --fail-fast fvt/predictor fvt/scaleToZero --timeout=40m
 
 # Command to regenerate the grpc go files from the proto files
 fvt-protoc:
@@ -87,7 +92,15 @@ delete: oc-login
 
 # Generate manifests e.g. CRD, RBAC etc.
 manifests: controller-gen
-	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=controller-role crd paths="./..." output:crd:artifacts:config=config/crd/bases
+		# NOTE: We're currently copying the CRD manifests from KServe rather than using this target to regenerate those
+		# that are common (all apart from predictors) because the formatting ends up different depending on the version
+		# of controller-gen and yq used. The KServe make manifests also includes a bunch of yaml post-processing which
+		# would need to be replicated here.
+		# HACK: ignore errors from generating the TrainedModel CRD from KServe, which is removed below
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=controller-role crd paths="github.com/kserve/kserve/pkg/apis/serving/v1alpha1" output:crd:dir=config/crd/bases
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=controller-role crd paths="github.com/kserve/kserve/pkg/apis/serving/v1beta1" output:crd:dir=config/crd/bases
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=controller-role crd paths="./..." output:crd:dir=config/crd/bases
+	rm -f ./config/crd/bases/serving.kserve.io_trainedmodels.yaml
 	pre-commit run --all-files prettier > /dev/null || true
 
 # Run go fmt against code
@@ -101,11 +114,11 @@ generate: controller-gen
 
 # Build the final runtime docker image
 build:
-	./scripts/build_docker.sh --target runtime
+	./scripts/build_docker.sh --target runtime --engine $(ENGINE)
 
 # Build the develop docker image
 build.develop:
-	./scripts/build_devimage.sh
+	./scripts/build_devimage.sh $(ENGINE)
 
 # Start a terminal session in the develop docker container
 develop: build.develop
@@ -144,14 +157,12 @@ endif
 mmesh-codegen:
 	protoc -I proto/ --go_out=plugins=grpc:generated/ $(PROTO_FILES)
 
-docs:
-	./scripts/docs.sh
-
-docs.dev:
-	./scripts/docs.sh --dev
+# Check markdown files for invalid links
+check-doc-links:
+	@python3 scripts/verify_doc_links.py && echo "$@: OK"
 
 # Override targets if they are included in RUN_ARGs so it doesn't run them twice
 $(eval $(RUN_ARGS):;@:)
 
 # Remove $(MAKECMDGOALS) if you don't intend make to just be a taskrunner
-.PHONY: all generate manifests fmt fvt controller-gen oc-login deploy-release build.develop $(MAKECMDGOALS)
+.PHONY: all generate manifests check-doc-links fmt fvt controller-gen oc-login deploy-release build.develop $(MAKECMDGOALS)

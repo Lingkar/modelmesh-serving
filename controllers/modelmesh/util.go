@@ -19,11 +19,16 @@ import (
 	"path/filepath"
 	"strings"
 
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+	kserveutils "github.com/kserve/kserve/pkg/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
+)
+
+var (
+	Union = kserveutils.Union
 )
 
 // Find a container by name in the given deployment, returns (-1, nil) if not found
@@ -54,11 +59,11 @@ func setEnvironmentVar(container string, variable string, value string, deployme
 
 // Determines if any unix domain sockets are present and returns
 // the unix:/// path and mount directory
-func unixDomainSockets(rt *api.ServingRuntime) (bool, []string, []string) {
+func unixDomainSockets(rts *kserveapi.ServingRuntimeSpec) (bool, []string, []string) {
 	endpoints := []*string{
-		rt.Spec.GrpcDataEndpoint,
-		//rt.Spec.HTTPDataEndpoint,
-		rt.Spec.GrpcMultiModelManagementEndpoint,
+		rts.GrpcDataEndpoint,
+		//rts.HTTPDataEndpoint,
+		rts.GrpcMultiModelManagementEndpoint,
 	}
 
 	var _endpoints, _fspaths []string
@@ -81,8 +86,8 @@ func unixDomainSockets(rt *api.ServingRuntime) (bool, []string, []string) {
 
 // useStorageHelper returns true if the model puller needs to be injected into the runtime deployment
 // either built-in adapter is not specified or storage helper is enabled
-func useStorageHelper(rt *api.ServingRuntime) bool {
-	return rt.Spec.BuiltInAdapter == nil && (rt.Spec.StorageHelper == nil || !rt.Spec.StorageHelper.Disabled)
+func useStorageHelper(rts *kserveapi.ServingRuntimeSpec) bool {
+	return rts.BuiltInAdapter == nil && (rts.StorageHelper == nil || !rts.StorageHelper.Disabled)
 }
 
 var (
@@ -100,7 +105,7 @@ func toYaml(resources []unstructured.Unstructured) string {
 }
 
 // Finds the common mount point for required unix domain sockets
-func mountPoint(rt *api.ServingRuntime) (bool, string, error) {
+func mountPoint(rts *kserveapi.ServingRuntimeSpec) (bool, string, error) {
 	findParentPath := func(str string) (bool, string, error) {
 		e, err := ParseEndpoint(str)
 		if err != nil {
@@ -119,14 +124,37 @@ func mountPoint(rt *api.ServingRuntime) (bool, string, error) {
 	//	isUnix, path, err := findParentPath(*rt.Spec.HTTPDataEndpoint)
 	//	return isUnix, path, err
 	//}
-	if rt.Spec.GrpcDataEndpoint != nil {
-		isUnix, path, err := findParentPath(*rt.Spec.GrpcDataEndpoint)
+	if rts.GrpcDataEndpoint != nil {
+		isUnix, path, err := findParentPath(*rts.GrpcDataEndpoint)
 		return isUnix, path, err
 	}
-	if rt.Spec.GrpcMultiModelManagementEndpoint != nil {
-		isUnix, path, err := findParentPath(*rt.Spec.GrpcMultiModelManagementEndpoint)
+	if rts.GrpcMultiModelManagementEndpoint != nil {
+		isUnix, path, err := findParentPath(*rts.GrpcMultiModelManagementEndpoint)
 		return isUnix, path, err
 	}
 
 	return false, "", nil
+}
+
+// mergeImagePullSecrets merge image pull secret lists and remove duplicates
+func mergeImagePullSecrets(secrets ...[]corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	imagePullSecrets := []corev1.LocalObjectReference{}
+
+	// remove the duplicated secrets and keep the order of the secret in the list
+	for _, secret := range secrets {
+		for _, v := range secret {
+			exist := false
+			for _, ips := range imagePullSecrets {
+				if ips.Name == v.Name {
+					exist = true
+					break
+				}
+			}
+			if !exist {
+				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: v.Name})
+			}
+		}
+	}
+
+	return imagePullSecrets
 }

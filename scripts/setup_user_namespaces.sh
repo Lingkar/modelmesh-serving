@@ -31,10 +31,10 @@ EOF
 
 ctrl_ns="modelmesh-serving"
 user_ns_array=()
-modelmesh_release="v0.8.0" # The latest release is the default
+modelmesh_release="v0.10.0"       # The latest release is the default
 create_storage_secret=false
 deploy_serving_runtimes=false
-dev_mode=false # When set to true, will use the locally cloned files instead of from a release
+dev_mode=false                    # Set to true to use locally cloned files instead of from a release
 
 while (($# > 0)); do
   case "$1" in
@@ -69,8 +69,19 @@ done
 if [[ ! -z $user_ns_array ]]; then
   runtime_source="https://github.com/kserve/modelmesh-serving/releases/download/${modelmesh_release}/modelmesh-runtimes.yaml"
   if [[ $dev_mode == "true" ]]; then
+
+    # Older versions of kustomize have different load restrictor flag formats.
+    # Can be removed once Kubeflow installation stops requiring v3.2.
+    kustomize_version=$(kustomize version --short | grep -o -E "[0-9]\.[0-9]\.[0-9]")
+    kustomize_load_restrictor_arg="--load-restrictor LoadRestrictionsNone"
+    if [[ -n "$kustomize_version" && "$kustomize_version" < "3.4.0" ]]; then
+        kustomize_load_restrictor_arg="--load_restrictor none"
+    elif [[ -n "$kustomize_version" && "$kustomize_version" < "4.0.1" ]]; then
+        kustomize_load_restrictor_arg="--load_restrictor LoadRestrictionsNone"
+    fi
+
     cp config/dependencies/minio-storage-secret.yaml .
-    kustomize build config/runtimes --load-restrictor LoadRestrictionsNone > runtimes.yaml
+    kustomize build config/runtimes ${kustomize_load_restrictor_arg} > runtimes.yaml
     runtime_source="runtimes.yaml"
   else
     wget https://raw.githubusercontent.com/kserve/modelmesh-serving/${modelmesh_release}/config/dependencies/minio-storage-secret.yaml

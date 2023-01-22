@@ -14,9 +14,11 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -45,6 +47,21 @@ storageHelperImage:
 		t.Fatalf("Expected StorageHelperImage=%v but found %v",
 			expectedStorageHelperImage, conf.StorageHelperImage.TaggedImage())
 	}
+}
+
+func TestNewMergedConfigFromStringWithDotNotationKeys(t *testing.T) {
+	yaml := `
+runtimePodLabels:
+  foo.bar: test
+  network-policy: allow-egress`
+
+	conf, err := NewMergedConfigFromString(yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, conf.RuntimePodLabels["foo.bar"], "test")
+	assert.Equal(t, conf.RuntimePodLabels["network-policy"], "allow-egress")
 }
 
 func TestNewMergedConfigFromStringImage(t *testing.T) {
@@ -179,6 +196,26 @@ grpcMaxMessageSizeBytes: 33554432`
 	}
 }
 
+func TestBuiltInServerTypes(t *testing.T) {
+	yaml := `
+builtInServerTypes:
+ - triton
+ - mlserver
+ - ovms
+ - a_new_one`
+
+	expectedTypes := []string{"triton", "mlserver", "ovms", "a_new_one"}
+
+	conf, err := NewMergedConfigFromString(yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(expectedTypes, conf.BuiltInServerTypes) {
+		t.Fatalf("Expected BuiltInServerTypes=%v but found %v", expectedTypes, conf.BuiltInServerTypes)
+	}
+}
+
 func TestResourceRequirements(t *testing.T) {
 	rr := ResourceRequirements{
 		Requests: ResourceQuantities{
@@ -254,5 +291,23 @@ internalModelMeshEnvVars:
 
 	if envvar.Value != expectedValue {
 		t.Fatalf("Expected InternalModelMeshEnvVars to have env var with value [%s], but got [%s]", expectedValue, envvar.Value)
+	}
+}
+
+func TestImagePullSecrets(t *testing.T) {
+	yaml := `
+imagePullSecrets:
+  - name: "config-image-pull-secret"
+`
+	expectedSecretName := "config-image-pull-secret"
+
+	conf, err := NewMergedConfigFromString(yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secret := conf.ImagePullSecrets[0]
+	if secret.Name != expectedSecretName {
+		t.Fatalf("Expected ImagePullSecrets to have secret with name [%s], but got [%s]", expectedSecretName, secret.Name)
 	}
 }

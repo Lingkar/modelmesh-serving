@@ -14,26 +14,47 @@
 package modelmesh
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
+	"github.com/go-logr/logr/testr"
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
+
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 )
 
+func newMockModelMeshDeployment(t *testing.T, rt *kserveapi.ServingRuntime) *Deployment {
+	return &Deployment{
+		Owner:  rt,
+		SRSpec: &rt.Spec,
+		Log:    testr.New(t),
+
+		PullerResources: &v1.ResourceRequirements{},
+		// may need to add more as tests expand
+	}
+
+}
+
 func TestOverlayMockRuntime(t *testing.T) {
-	version := "version"
-	v := &api.ServingRuntime{
-		Spec: api.ServingRuntimeSpec{
-			ServingRuntimePodSpec: api.ServingRuntimePodSpec{
-				Containers: []api.Container{
+	const adapterEnvOverrideName = "ADAPTER_PORT"
+	const adapterEnvOverrideValue = "override"
+	const adapterEnvNewName = "NEW_ENV_VAR"
+	const adapterEnvNewValue = "some value"
+	const adapterType = "custom"
+	v := &kserveapi.ServingRuntime{
+		Spec: kserveapi.ServingRuntimeSpec{
+			ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+				Containers: []v1.Container{
 					{
-						Name:            "mock-runtime",
+						Name:            adapterType,
 						Image:           "image",
 						ImagePullPolicy: "IfNotPresent",
 						WorkingDir:      "mock-working-dir",
@@ -57,10 +78,26 @@ func TestOverlayMockRuntime(t *testing.T) {
 					},
 				},
 			},
-			SupportedModelFormats: []api.SupportedModelFormat{
+			SupportedModelFormats: []kserveapi.SupportedModelFormat{
 				{
 					Name:    "name",
-					Version: &version,
+					Version: &[]string{"version"}[0],
+				},
+			},
+			BuiltInAdapter: &kserveapi.BuiltInAdapter{
+				ServerType:                adapterType,
+				RuntimeManagementPort:     0,
+				MemBufferBytes:            1337,
+				ModelLoadingTimeoutMillis: 1000,
+				Env: []v1.EnvVar{
+					{
+						Name:  adapterEnvOverrideName,
+						Value: adapterEnvOverrideValue,
+					},
+					{
+						Name:  adapterEnvNewName,
+						Value: adapterEnvNewValue,
+					},
 				},
 			},
 		},
@@ -80,22 +117,46 @@ func TestOverlayMockRuntime(t *testing.T) {
 		},
 	}
 
-	m := Deployment{Owner: v}
+	m := newMockModelMeshDeployment(t, v)
 	m.addRuntimeToDeployment(deployment)
 
 	scontainer := v.Spec.Containers[0]
 	tcontainer := deployment.Spec.Template.Spec.Containers[1]
 	if tcontainer.Name != scontainer.Name {
-		t.Fatal("The runtime should have added a container into the deployment")
+		t.Error("The runtime should have added a container into the deployment")
 	}
 	if tcontainer.Image != scontainer.Image {
-		t.Fatalf("Expected the added container image to be %v but it was %v", scontainer.Image, tcontainer.Image)
+		t.Errorf("Expected the added container image to be %v but it was %v", scontainer.Image, tcontainer.Image)
 	}
 	if !reflect.DeepEqual(tcontainer.Args, scontainer.Args) {
-		t.Fatalf("Expected the added container args to be %v but it was %v", scontainer.Args, tcontainer.Args)
+		t.Errorf("Expected the added container args to be %v but it was %v", scontainer.Args, tcontainer.Args)
 	}
 	if !reflect.DeepEqual(tcontainer.Env, scontainer.Env) {
-		t.Fatalf("Expected the env in target container to be \n%v but it was \n%v", toString(scontainer.Env), toString(tcontainer.Env))
+		t.Errorf("Expected the env in target container to be \n%v but it was \n%v", toString(scontainer.Env), toString(tcontainer.Env))
+	}
+
+	// check the injected adapter
+	if len(deployment.Spec.Template.Spec.Containers) != 3 {
+		t.Fatalf("Expected 3 containers to be be added, but got \n%v", len(deployment.Spec.Template.Spec.Containers))
+	}
+
+	acontainer := deployment.Spec.Template.Spec.Containers[2]
+	expectedAdapterName := fmt.Sprintf("%s-adapter", adapterType)
+	if acontainer.Name != expectedAdapterName {
+		t.Errorf("Expected the adapter container name to be %v but it was %v", expectedAdapterName, acontainer.Name)
+	}
+
+	for _, env := range acontainer.Env {
+		if env.Name == adapterEnvOverrideName {
+			if env.Value != adapterEnvOverrideValue {
+				t.Errorf("Expected the env var %s in adapter container to be \"%s\" but it was \"%s\"", adapterEnvOverrideName, adapterEnvOverrideValue, env.Value)
+			}
+		}
+		if env.Name == adapterEnvNewName {
+			if env.Value != adapterEnvNewValue {
+				t.Errorf("Expected the env var %s in adapter container to be \"%s\" but it was \"%s\"", adapterEnvNewName, adapterEnvNewValue, env.Value)
+			}
+		}
 	}
 }
 
@@ -104,60 +165,105 @@ func toString(o interface{}) string {
 	return string(b)
 }
 
-var addStorageConfigVolumeTests = []struct {
-	name           string
-	servingRuntime *api.ServingRuntime
-	expectError    bool
-	expectVolume   bool
-}{
-	{
-		name:           "default",
-		servingRuntime: &api.ServingRuntime{},
-		expectError:    false,
-		expectVolume:   true,
-	},
-	{
-		name: "helper-disabled",
-		servingRuntime: &api.ServingRuntime{
-			Spec: api.ServingRuntimeSpec{
-				StorageHelper: &api.StorageHelper{
-					Disabled: true,
+func TestAddVolumesToDeployment(t *testing.T) {
+	for _, tt := range []struct {
+		name                 string
+		servingRuntime       *kserveapi.ServingRuntime
+		expectedExtraVolumes []string
+		expectStorageVolumes bool
+		expectSocketVolume   bool
+	}{
+		{
+			name: "with-volume",
+			servingRuntime: &kserveapi.ServingRuntime{
+				Spec: kserveapi.ServingRuntimeSpec{
+					ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+						Volumes: []v1.Volume{
+							{
+								Name: "my-volume",
+							},
+						},
+					},
 				},
 			},
+			expectedExtraVolumes: []string{"my-volume"},
+			expectStorageVolumes: true,
+			expectSocketVolume:   false,
 		},
-		expectError:  false,
-		expectVolume: false,
-	},
-}
-
-func TestAddStorageConfigVolume(t *testing.T) {
-	for _, tt := range addStorageConfigVolumeTests {
+		{
+			name: "unix-socket-grpc",
+			servingRuntime: &kserveapi.ServingRuntime{
+				Spec: kserveapi.ServingRuntimeSpec{
+					GrpcDataEndpoint: &[]string{"unix:///socket"}[0],
+				},
+			},
+			expectStorageVolumes: true,
+			expectSocketVolume:   true,
+		},
+		{
+			name: "built-in-adapter",
+			servingRuntime: &kserveapi.ServingRuntime{
+				Spec: kserveapi.ServingRuntimeSpec{
+					BuiltInAdapter: &kserveapi.BuiltInAdapter{
+						ServerType: kserveapi.MLServer,
+					},
+				},
+			},
+			expectStorageVolumes: true,
+			expectSocketVolume:   false,
+		},
+		{
+			name: "helper-disabled",
+			servingRuntime: &kserveapi.ServingRuntime{
+				Spec: kserveapi.ServingRuntimeSpec{
+					StorageHelper: &kserveapi.StorageHelper{
+						Disabled: true,
+					},
+				},
+			},
+			expectStorageVolumes: false,
+			expectSocketVolume:   false,
+		},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			deployment := &appsv1.Deployment{}
 			rt := tt.servingRuntime
 
-			m := Deployment{Owner: rt}
-			err := m.addStorageConfigVolume(deployment)
-
-			if tt.expectError && err == nil {
-				t.Error("Expected an error, but didn't get one")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
+			m := Deployment{Owner: rt, SRSpec: &rt.Spec}
+			if err := m.addVolumesToDeployment(deployment); err != nil {
+				t.Errorf("Call to add volumes failed: %v", err)
 			}
 
-			numVols := len(deployment.Spec.Template.Spec.Volumes)
-			var volNames []string
+			// map of expected volume names to bool of whether or not it is found
+			expectedVolumes := map[string]bool{
+				// models dir is always mounted
+				ModelsDirVolume: false,
+			}
+			for _, v := range tt.expectedExtraVolumes {
+				expectedVolumes[v] = false
+			}
+			if tt.expectStorageVolumes {
+				expectedVolumes[ConfigStorageMount] = false
+			}
+			if tt.expectSocketVolume {
+				expectedVolumes[SocketVolume] = false
+			}
+
 			for _, v := range deployment.Spec.Template.Spec.Volumes {
-				volNames = append(volNames, v.Name)
-			}
-			if tt.expectVolume && numVols != 1 {
-				t.Errorf("Expected a single volume but found %d: %s", numVols, volNames)
-			}
-			if !tt.expectVolume && numVols != 0 {
-				t.Errorf("Unexpected volume(s) added to deployment: %s", volNames)
+				if _, ok := expectedVolumes[v.Name]; !ok {
+					t.Errorf("Unexpected volume found: %s", v.Name)
+				} else if expectedVolumes[v.Name] {
+					t.Errorf("Duplicate volume found: %s", v.Name)
+				} else {
+					expectedVolumes[v.Name] = true
+				}
 			}
 
+			for volumeName, volumeFound := range expectedVolumes {
+				if !volumeFound {
+					t.Errorf("Expected to find volume that does not exist: %s", volumeName)
+				}
+			}
 		})
 	}
 }
@@ -165,8 +271,8 @@ func TestAddStorageConfigVolume(t *testing.T) {
 func TestAddPassThroughPodFieldsToDeployment(t *testing.T) {
 	t.Run("defaults-to-no-changes", func(t *testing.T) {
 		d := &appsv1.Deployment{}
-		sr := &api.ServingRuntime{}
-		m := Deployment{Owner: sr}
+		sr := &kserveapi.ServingRuntime{}
+		m := Deployment{Owner: sr, SRSpec: &sr.Spec}
 		err := m.addPassThroughPodFieldsToDeployment(d)
 
 		if err != nil {
@@ -207,9 +313,9 @@ func TestAddPassThroughPodFieldsToDeployment(t *testing.T) {
 			},
 		}
 
-		sr := &api.ServingRuntime{
-			Spec: api.ServingRuntimeSpec{
-				ServingRuntimePodSpec: api.ServingRuntimePodSpec{
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
 					NodeSelector: nodeSelector,
 					Affinity:     &affinity,
 					Tolerations:  tolerations,
@@ -217,7 +323,7 @@ func TestAddPassThroughPodFieldsToDeployment(t *testing.T) {
 			},
 		}
 
-		m := Deployment{Owner: sr}
+		m := Deployment{Owner: sr, SRSpec: &sr.Spec}
 		d := &appsv1.Deployment{}
 		err := m.addPassThroughPodFieldsToDeployment(d)
 
@@ -239,5 +345,241 @@ func TestAddPassThroughPodFieldsToDeployment(t *testing.T) {
 		if !cmp.Equal(*d, expectedDeployment) {
 			t.Error("Configured Deployment did not contain expected pod template")
 		}
+	})
+}
+
+func TestConfigureRuntimeAnnotations(t *testing.T) {
+	t.Run("success-set-annotations", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{}
+		annotationsData := map[string]string{
+			"foo":            "bar",
+			"network-policy": "allow-egress",
+		}
+
+		m := Deployment{Owner: sr, AnnotationsMap: annotationsData, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecAnnotations(deploy)
+		assert.Nil(t, err)
+		// assert.Equal(t, deploy.Spec.Template.Labels, labelData)
+		assert.Equal(t, deploy.Spec.Template.Annotations["foo"], "bar")
+		assert.Equal(t, deploy.Spec.Template.Annotations["network-policy"], "allow-egress")
+	})
+
+	t.Run("success-no-annotations", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{}
+		m := Deployment{Owner: sr, AnnotationsMap: map[string]string{}, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecAnnotations(deploy)
+		assert.Nil(t, err)
+		assert.Empty(t, deploy.Spec.Template.Annotations)
+	})
+
+	t.Run("success-set-annotations-from-servingruntime-spec", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+					Annotations: map[string]string{
+						"foo":            "bar",
+						"network-policy": "allow-egress",
+					},
+				},
+			},
+		}
+
+		m := Deployment{Owner: sr, AnnotationsMap: map[string]string{}, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecAnnotations(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Annotations["foo"], "bar")
+		assert.Equal(t, deploy.Spec.Template.Annotations["network-policy"], "allow-egress")
+	})
+
+	t.Run("success-overwrite-annotations-from-servingruntime-spec", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		// annotations from user config
+		annotationsData := map[string]string{
+			"foo":            "bar",
+			"network-policy": "allow-egress",
+		}
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+					Annotations: map[string]string{
+						"network-policy": "overwritten-by-servingruntime",
+					},
+				},
+			},
+		}
+
+		m := Deployment{Owner: sr, AnnotationsMap: annotationsData, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecAnnotations(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Annotations["foo"], "bar")
+		assert.Equal(t, deploy.Spec.Template.Annotations["network-policy"], "overwritten-by-servingruntime")
+	})
+}
+
+func TestConfigureRuntimeLabels(t *testing.T) {
+
+	t.Run("success-set-labels", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{}
+		labelData := map[string]string{
+			"foo":            "bar",
+			"network-policy": "allow-egress",
+			"cp4s-internet":  "allow",
+		}
+
+		m := Deployment{Owner: sr, LabelsMap: labelData, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecLabels(deploy)
+		assert.Nil(t, err)
+		// assert.Equal(t, deploy.Spec.Template.Labels, labelData)
+		assert.Equal(t, deploy.Spec.Template.Labels["foo"], "bar")
+		assert.Equal(t, deploy.Spec.Template.Labels["network-policy"], "allow-egress")
+		assert.Equal(t, deploy.Spec.Template.Labels["cp4s-internet"], "allow")
+	})
+
+	t.Run("success-no-labels", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{}
+		m := Deployment{Owner: sr, LabelsMap: map[string]string{}, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecLabels(deploy)
+		assert.Nil(t, err)
+		assert.Empty(t, deploy.Spec.Template.Labels)
+	})
+
+	t.Run("success-set-labels-from-servingruntime-spec", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+					Labels: map[string]string{
+						"foo":            "bar",
+						"network-policy": "allow-egress",
+						"cp4s-internet":  "allow",
+					},
+				},
+			},
+		}
+
+		m := Deployment{Owner: sr, LabelsMap: map[string]string{}, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecLabels(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Labels["foo"], "bar")
+		assert.Equal(t, deploy.Spec.Template.Labels["network-policy"], "allow-egress")
+		assert.Equal(t, deploy.Spec.Template.Labels["cp4s-internet"], "allow")
+	})
+
+	t.Run("success-overwrite-labels-from-servingruntime-spec", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		// labels from user config
+		labelData := map[string]string{
+			"foo":            "bar",
+			"network-policy": "allow-egress",
+			"cp4s-internet":  "allow",
+		}
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+					Labels: map[string]string{
+						"network-policy": "overwritten-by-servingruntime",
+					},
+				},
+			},
+		}
+
+		m := Deployment{Owner: sr, LabelsMap: labelData, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecLabels(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Labels["foo"], "bar")
+		assert.Equal(t, deploy.Spec.Template.Labels["network-policy"], "overwritten-by-servingruntime")
+		assert.Equal(t, deploy.Spec.Template.Labels["cp4s-internet"], "allow")
+	})
+}
+
+func TestConfigureRuntimeImagePullSecrets(t *testing.T) {
+	t.Run("success-set-image-pull-secrets", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{}
+		imagePullSecretsData := []v1.LocalObjectReference{
+			{Name: "config-image-pull-secret-1"},
+			{Name: "config-image-pull-secret-2"},
+		}
+
+		m := Deployment{Owner: sr, ImagePullSecrets: imagePullSecretsData, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecImagePullSecrets(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[0].Name, "config-image-pull-secret-1")
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[1].Name, "config-image-pull-secret-2")
+	})
+
+	t.Run("success-no-image-pull-secrets", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{}
+		m := Deployment{Owner: sr, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecImagePullSecrets(deploy)
+		assert.Nil(t, err)
+		assert.Empty(t, deploy.Spec.Template.Spec.ImagePullSecrets)
+	})
+
+	t.Run("success-set-image-pull-secrets-from-servingruntime-spec", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+					ImagePullSecrets: []v1.LocalObjectReference{
+						{Name: "sr-image-pull-secret-1"},
+						{Name: "sr-image-pull-secret-2"},
+					},
+				},
+			},
+		}
+
+		m := Deployment{Owner: sr, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecImagePullSecrets(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[0].Name, "sr-image-pull-secret-1")
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[1].Name, "sr-image-pull-secret-2")
+	})
+
+	t.Run("success-set-image-pull-secrets-from-config-and-servingruntime-spec", func(t *testing.T) {
+		deploy := &appsv1.Deployment{}
+		imagePullSecretsData := []v1.LocalObjectReference{
+			{Name: "config-image-pull-secret-1"},
+			{Name: "config-image-pull-secret-2"},
+			{Name: "overlap-image-pull-secret"},
+		}
+		sr := &kserveapi.ServingRuntime{
+			Spec: kserveapi.ServingRuntimeSpec{
+				ServingRuntimePodSpec: kserveapi.ServingRuntimePodSpec{
+					ImagePullSecrets: []v1.LocalObjectReference{
+						{Name: "overlap-image-pull-secret"},
+						{Name: "sr-image-pull-secret-1"},
+						{Name: "sr-image-pull-secret-2"},
+					},
+				},
+			},
+		}
+
+		m := Deployment{Owner: sr, ImagePullSecrets: imagePullSecretsData, SRSpec: &sr.Spec}
+
+		err := m.configureRuntimePodSpecImagePullSecrets(deploy)
+		assert.Nil(t, err)
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[0].Name, "config-image-pull-secret-1")
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[1].Name, "config-image-pull-secret-2")
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[2].Name, "overlap-image-pull-secret")
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[3].Name, "sr-image-pull-secret-1")
+		assert.Equal(t, deploy.Spec.Template.Spec.ImagePullSecrets[4].Name, "sr-image-pull-secret-2")
 	})
 }

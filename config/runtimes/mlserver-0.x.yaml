@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 apiVersion: serving.kserve.io/v1alpha1
-kind: ServingRuntime
+kind: ClusterServingRuntime
 metadata:
   name: mlserver-0.x
   labels:
@@ -29,6 +29,8 @@ spec:
       version: "3" # v3.2.1
       autoSelect: true
 
+  protocolVersions:
+    - grpc-v2
   multiModel: true
 
   grpcEndpoint: "port:8085"
@@ -55,9 +57,10 @@ spec:
         # Set server addr to localhost to ensure MLServer only listen inside the pod
         - name: MLSERVER_HOST
           value: "127.0.0.1"
-        # Increase gRPC max message size to 16 MiB to support larger payloads
+        # Increase gRPC max message size to support larger payloads
+        # Unlimited because it will be restricted at the model mesh layer
         - name: MLSERVER_GRPC_MAX_MESSAGE_LENGTH
-          value: "16777216"
+          value: "-1"
       resources:
         requests:
           cpu: 500m
@@ -66,7 +69,7 @@ spec:
           cpu: "5"
           memory: 1Gi
   builtInAdapter:
-    serverType: "mlserver"
+    serverType: mlserver
     runtimeManagementPort: 8001
     memBufferBytes: 134217728
     modelLoadingTimeoutMillis: 90000

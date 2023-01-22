@@ -2,7 +2,9 @@ name: FVTs
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - 'main'
+      - 'release-*'
     paths:
       - '**'
       - '!.github/**'
@@ -18,14 +20,14 @@ jobs:
       - uses: actions/checkout@v2
       - uses: actions/setup-go@v2
         with:
-          go-version: '1.17.3'
+          go-version: '1.18.7'
       - name: Setup Minikube
         run: |
-          wget --no-verbose https://github.com/kubernetes/minikube/releases/download/v1.21.0/minikube-linux-amd64
+          wget --no-verbose https://github.com/kubernetes/minikube/releases/download/v1.25.1/minikube-linux-amd64
           sudo cp minikube-linux-amd64 /usr/local/bin/minikube
           sudo chmod 755 /usr/local/bin/minikube
           sudo apt-get install -y conntrack socat
-          minikube start --driver=none --kubernetes-version v1.20.7
+          minikube start --driver=none --kubernetes-version v1.22.10
       - name: Check pods
         run: |
           sleep 30
@@ -33,17 +35,24 @@ jobs:
       - name: Set controller image tag
         run: echo "IMAGE_TAG=$(date +'%Y%m%dT%H%M%S%Z')" >> $GITHUB_ENV
       - name: Update configs
-        # Update the image tag and reduce some CPU request amounts to allow FVTs to run
+        # Update the image tag and reduce some resource request amounts to allow FVTs to run
         # on reduced resource environments. Also the RollingUpdate strategy for Runtime deployments
         # is adjusted for these environments.
+        # Disable the torchserve ServingRuntime for now (insufficent resources to run them all).
         run: |
           sed -i 's/newTag:.*$/newTag: '"${{ env.IMAGE_TAG }}"'/' config/manager/kustomization.yaml
           sed -i '0,/cpu:.*$/s/cpu:.*$/cpu: 100m/' \
             config/default/config-defaults.yaml \
             config/runtimes/mlserver-0.x.yaml \
-            config/runtimes/triton-2.x.yaml
+            config/runtimes/triton-2.x.yaml \
+            config/runtimes/ovms-1.x.yaml
+          sed -i 's/memory:.*$/memory: 512Mi/g' \
+            config/runtimes/mlserver-0.x.yaml \
+            config/runtimes/triton-2.x.yaml \
+            config/runtimes/ovms-1.x.yaml
           sed -i 's/maxSurge:.*$/maxSurge: 0/' config/internal/base/deployment.yaml.tmpl
           sed -i 's/maxUnavailable:.*$/maxUnavailable: 100%/' config/internal/base/deployment.yaml.tmpl
+          echo -e '\n  disabled: true' >> config/runtimes/torchserve-0.x.yaml
       - name: Build Controller image
         run: |
           make build.develop
@@ -51,12 +60,20 @@ jobs:
       - name: Install ModelMesh Serving
         run: |
           kubectl create ns modelmesh-serving
-          kubectl create ns modelmesh-user
-          ./scripts/install.sh --namespace modelmesh-serving -u modelmesh-user --fvt --dev-mode-logging
+          ./scripts/install.sh --namespace modelmesh-serving --fvt --dev-mode-logging
+      - name: Free up disk space
+        run: |
+          echo "Pruning images"
+          docker image prune -a -f
+          docker system df
+          df -h
       - name: Pre-pull runtime images
         run: |
           docker pull nvcr.io/nvidia/tritonserver:22.12-py3
           docker pull janleo500/mlserver:latest
+          docker pull janleo500/modelmesh
+          docker pull janleo500/rest-proxy
+          docker pull janleo500/modelmesh-runtime-adapter
       - name: Check installation
         run: |
           docker images
@@ -64,7 +81,8 @@ jobs:
           kubectl get servingruntimes
       - name: Run FVTs
         run: |
+          go install github.com/onsi/ginkgo/v2/ginkgo
+          export PATH=/root/go/bin/:$PATH
           export NAMESPACE=modelmesh-serving
-          make fvt
-          export NAMESPACE=modelmesh-user
+          export NAMESPACESCOPEMODE=false
           make fvt

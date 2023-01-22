@@ -31,7 +31,6 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -47,9 +46,7 @@ import (
 	"github.com/kserve/modelmesh-serving/controllers/modelmesh"
 	mfc "github.com/manifestival/controller-runtime-client"
 	mf "github.com/manifestival/manifestival"
-	. "github.com/onsi/ginkgo"
-	ginkgoConfig "github.com/onsi/ginkgo/config"
-	"github.com/onsi/ginkgo/reporters"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/tommy351/goldga"
 	corev1 "k8s.io/api/core/v1"
@@ -62,6 +59,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/yaml"
 
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	// +kubebuilder:scaffold:imports
@@ -93,14 +91,11 @@ func SnapshotMatcher() *goldga.Matcher {
 
 func TestAPIs(t *testing.T) {
 	RegisterFailHandler(Fail)
-	junitReporter := reporters.NewJUnitReporter(fmt.Sprintf("../target/test-reports/junit_Controller_%d.xml", ginkgoConfig.GinkgoConfig.ParallelNode))
 
-	RunSpecsWithDefaultAndCustomReporters(t,
-		"Controller Suite",
-		[]Reporter{junitReporter})
+	RunSpecs(t, "Controller Suite")
 }
 
-var _ = BeforeSuite(func(done Done) {
+var _ = BeforeSuite(func() {
 	//Set template dir to account for test working dirs
 	SetTemplateDir()
 
@@ -182,9 +177,7 @@ var _ = BeforeSuite(func(done Done) {
 		err = k8sManager.Start(ctrl.SetupSignalHandler())
 		Expect(err).ToNot(HaveOccurred())
 	}()
-
-	close(done)
-}, 60)
+})
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
@@ -204,7 +197,7 @@ var _ = AfterEach(func() {
 	var err error
 	inNamespace := client.InNamespace(namespace)
 	// ServingRuntimes
-	err = k8sClient.DeleteAllOf(context.TODO(), &api.ServingRuntime{}, inNamespace)
+	err = k8sClient.DeleteAllOf(context.TODO(), &kserveapi.ServingRuntime{}, inNamespace)
 	Expect(err).ToNot(HaveOccurred())
 	// Predictors
 	err = k8sClient.DeleteAllOf(context.TODO(), &api.Predictor{}, inNamespace)
@@ -213,15 +206,19 @@ var _ = AfterEach(func() {
 
 var defaultTestConfigFileContents []byte
 
-func resetReconcilerConfig() {
+func getDefaultConfig() (*config2.Config, error) {
 	if defaultTestConfigFileContents == nil {
 		var err error
 		var testConfigFile = "./testdata/test-config-defaults.yaml"
-		defaultTestConfigFileContents, err = ioutil.ReadFile(testConfigFile)
-		Expect(err).ToNot(HaveOccurred())
+		if defaultTestConfigFileContents, err = ioutil.ReadFile(testConfigFile); err != nil {
+			return nil, err
+		}
 	}
+	return config2.NewMergedConfigFromString(string(defaultTestConfigFileContents))
+}
 
-	config, err := config2.NewMergedConfigFromString(string(defaultTestConfigFileContents))
+func resetReconcilerConfig() {
+	config, err := getDefaultConfig()
 	Expect(err).ToNot(HaveOccurred())
 
 	// re-assign the reference to the config

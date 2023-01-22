@@ -12,9 +12,9 @@
 
 We provide an install script to quickly run ModelMesh Serving with a provisioned etcd server. This may be useful for experimentation or development but should not be used in production.
 
-The install script has a `--quickstart` option for setting up a self-contained ModelMesh Serving instance. This will deploy and configure local etcd and MinIO servers in the same Kubernetes namespace. Note that this is only for experimentation and/or development use - in particular the connections to these datastores are not secure and the etcd cluster is a single member which is not highly available. Use of `--quickstart` also configures the `storage-config` secret to be able to pull from the [ModelMesh Serving example models bucket](../example-models.md) which contains the model data for the sample Predictors. For complete details on the manfiests applied with `--quickstart` see [config/dependencies/quickstart.yaml](https://github.com/kserve/modelmesh-serving/blob/main/config/dependencies/quickstart.yaml).
+The install script has a `--quickstart` option for setting up a self-contained ModelMesh Serving instance. This will deploy and configure local etcd and MinIO servers in the same Kubernetes namespace. Note that this is only for experimentation and/or development use - in particular the connections to these datastores are not secure and the etcd cluster is a single member which is not highly available. Use of `--quickstart` also configures the `storage-config` secret to be able to pull from the [ModelMesh Serving example models bucket](../example-models.md) which contains the model data for the sample `InferenceService`s. For complete details on the manifests applied with `--quickstart` see [config/dependencies/quickstart.yaml](https://github.com/kserve/modelmesh-serving/blob/main/config/dependencies/quickstart.yaml).
 
-## Setup the etcd connection information
+## Set up the etcd connection information
 
 If the `--quickstart` install option is **not** being used, details of an existing etcd cluster must be specified prior to installation. Otherwise, please skip this step and proceed to [Installation](#installation).
 
@@ -39,10 +39,10 @@ A secret named `model-serving-etcd` will be created and passed to the controller
 
 ## Installation
 
-Install the latest release of [modelmesh-serving](https://github.com/kserve/modelmesh-serving) by first cloning the corresponding release branch:
+Install the latest release of [modelmesh-serving](https://github.com/kserve/modelmesh-serving/releases/latest) by first cloning the corresponding release branch:
 
 ```shell
-RELEASE=release-0.8
+RELEASE=release-0.10
 git clone -b $RELEASE --depth 1 --single-branch https://github.com/kserve/modelmesh-serving.git
 cd modelmesh-serving
 ```
@@ -116,7 +116,7 @@ usage: ./scripts/setup_user_namespaces.sh [flags]
     -h, --help                    Display this help
 ```
 
-The following command will setup two namespaces with the required label, optional storage secret, and built-in runtimes, so you can deploy sample predictors into any of them immediately.
+The following command will setup two namespaces with the required label, optional storage secret, and built-in runtimes, so you can deploy sample `InferenceService`s into any of them immediately.
 
 ```shell
 ./scripts/setup_user_namespaces.sh -u "ns1 ns2" --create-storage-secret --deploy-serving-runtimes

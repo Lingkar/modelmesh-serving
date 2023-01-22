@@ -72,29 +72,46 @@ if [[ -n $path_to_configs ]]; then
   cd "$path_to_configs"
 fi
 
+old_namespace=$(kubectl config  get-contexts $(kubectl config current-context) |tail -1|awk '{ print $5 }')
+if [[ ! -n $old_namespace ]]; then
+  old_namespace="default"
+fi
+echo "current namespace: $old_namespace"
 if [[ -n $namespace ]]; then
-  old_namespace=$(kubectl config  get-contexts $(kubectl config current-context) |tail -1|awk '{ print $5 }')
-  if [[ ! -n $old_namespace ]]; then
-    old_namespace="default"
-  fi
-  echo "current namespace: $old_namespace"
   kubectl config set-context --current --namespace="$namespace"
+else
+  namespace=$old_namespace
 fi
 
+echo "deleting in namespace: $namespace"
+
 # Ensure the namespace is overridden for all the resources
-cd default
+pushd default
 kustomize edit set namespace "$namespace"
-cd ..
+popd
+pushd rbac/namespace-scope
+kustomize edit set namespace "$namespace"
+popd
+
+# Older versions of kustomize have different load restrictor flag formats.
+# Can be removed once Kubeflow installation stops requiring v3.2.
+kustomize_version=$(kustomize version --short | grep -o -E "[0-9]\.[0-9]\.[0-9]")
+kustomize_load_restrictor_arg="--load-restrictor LoadRestrictionsNone"
+if [[ -n "$kustomize_version" && "$kustomize_version" < "3.4.0" ]]; then
+    kustomize_load_restrictor_arg="--load_restrictor none"
+elif [[ -n "$kustomize_version" && "$kustomize_version" < "4.0.1" ]]; then
+    kustomize_load_restrictor_arg="--load_restrictor LoadRestrictionsNone"
+fi
 
 if [[ ! -z $user_ns_array ]]; then
-  kustomize build runtimes --load-restrictor LoadRestrictionsNone > runtimes.yaml
+  kustomize build runtimes ${kustomize_load_restrictor_arg} > runtimes.yaml
   cp dependencies/minio-storage-secret.yaml .
   sed -i.bak "s/controller_namespace/${namespace}/g" minio-storage-secret.yaml
 
   for user_ns in "${user_ns_array[@]}"; do
     if ! kubectl get namespaces $user_ns >/dev/null; then
       echo "Kube namespace does not exist: $user_ns. Will skip."
-    else 
+    else
       kubectl label namespace ${user_ns} modelmesh-enabled-
       kubectl delete -f minio-storage-secret.yaml -n ${user_ns}
       kubectl delete -f runtimes.yaml -n ${user_ns}
@@ -105,12 +122,22 @@ if [[ ! -z $user_ns_array ]]; then
   rm runtimes.yaml
 fi
 
+# Determine whether a modelmesh-controller-rolebinding clusterrolebinding exists and is
+# associated with the service account in this namespace. If not, don't delete the cluster level RBAC.
+set +e
+crb_ns=$(kubectl get clusterrolebinding modelmesh-controller-rolebinding -o json | jq -r .subjects[0].namespace)
+set -e
+if [[ "$crb_ns" == "$namespace" ]]; then
+  echo "deleting cluster scope RBAC"
+  kustomize build rbac/cluster-scope | kubectl delete -f - --ignore-not-found=true
+fi
 kustomize build default | kubectl delete -f - --ignore-not-found=true
-kustomize build runtimes --load-restrictor LoadRestrictionsNone | kubectl delete -f - --ignore-not-found=true
+kustomize build rbac/namespace-scope | kubectl delete -f - --ignore-not-found=true
+kustomize build runtimes ${kustomize_load_restrictor_arg} | kubectl delete -f - --ignore-not-found=true
 kubectl delete -f dependencies/quickstart.yaml --ignore-not-found=true
 kubectl delete -f dependencies/fvt.yaml --ignore-not-found=true
 
 # Roll back to previous status
-if [[ -n $namespace ]]; then
+if [[ "$namespace" != "$old_namespace" ]]; then
   kubectl config set-context --current --namespace=${old_namespace}
 fi

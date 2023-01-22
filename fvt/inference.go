@@ -16,6 +16,7 @@ package fvt
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"math"
 	"os"
 
@@ -25,6 +26,9 @@ import (
 	"github.com/moverest/mnist"
 
 	inference "github.com/kserve/modelmesh-serving/fvt/generated"
+
+	tfsframework "github.com/kserve/modelmesh-serving/fvt/generated/tensorflow/core/framework"
+	tfsapi "github.com/kserve/modelmesh-serving/fvt/generated/tensorflow_serving/apis"
 )
 
 // Used for checking if floats are sufficiently close enough.
@@ -49,11 +53,54 @@ func ExpectSuccessfulInference_onnxMnist(predictorName string) {
 		Inputs:    []*inference.ModelInferRequest_InferInputTensor{inferInput},
 	}
 
-	inferResponse, err := fvtClient.RunKfsInference(inferRequest)
+	inferResponse, err := FVTClientInstance.RunKfsInference(inferRequest)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(inferResponse).ToNot(BeNil())
 	Expect(inferResponse.ModelName).To(HavePrefix(predictorName))
 	// Expect(inferResponse.RawOutputContents[0][0]).To(BeEquivalentTo(0))
+}
+
+func ExpectSuccessfulInference_openvinoMnistTFSPredict(predictorName string) {
+	image := LoadMnistImage(0)
+
+	// build the grpc inference call
+	// convert the image array of floats to raw bytes
+	imageBytes, err := convertFloatArrayToRawContent(image)
+	Expect(err).ToNot(HaveOccurred())
+
+	inferRequest := &tfsapi.PredictRequest{
+		ModelSpec: &tfsapi.ModelSpec{
+			Name: predictorName,
+		},
+		Inputs: map[string]*tfsframework.TensorProto{
+			"Input3": {
+				Dtype: tfsframework.DataType_DT_FLOAT,
+				TensorShape: &tfsframework.TensorShapeProto{
+					Dim: []*tfsframework.TensorShapeProto_Dim{
+						{Size: 1}, {Size: 1}, {Size: 28}, {Size: 28},
+					},
+				},
+				TensorContent: imageBytes,
+			},
+		},
+	}
+
+	inferResponse, err := FVTClientInstance.RunTfsInference(inferRequest)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(inferResponse).ToNot(BeNil())
+	// NOTE: ModelSpec is not included in the response, so we can't assert on the name
+	// validate the the activation for the digit 7 is the maximum
+	activations, err := convertRawOutputContentsTo10Floats(inferResponse.Outputs["Plus214_Output_0"].TensorContent)
+	max := activations[0]
+	maxI := 0
+	for i := 1; i < 10; i++ {
+		if activations[i] > max {
+			max = activations[i]
+			maxI = i
+		}
+	}
+	Expect(maxI).To(Equal(7))
+	Expect(err).ToNot(HaveOccurred())
 }
 
 // PyTorch CIFAR
@@ -73,7 +120,7 @@ func ExpectSuccessfulInference_pytorchCifar(predictorName string) {
 	}
 
 	// run the inference
-	inferResponse, err := fvtClient.RunKfsInference(inferRequest)
+	inferResponse, err := FVTClientInstance.RunKfsInference(inferRequest)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(inferResponse).ToNot(BeNil())
 	Expect(inferResponse.ModelName).To(HavePrefix(predictorName))
@@ -81,6 +128,58 @@ func ExpectSuccessfulInference_pytorchCifar(predictorName string) {
 	output, err := convertRawOutputContentsTo10Floats(inferResponse.GetRawOutputContents()[0])
 	Expect(err).ToNot(HaveOccurred())
 	Expect(math.Abs(float64(output[8]-7.343689441680908)) < EPSILON).To(BeTrue()) // the 9th class gets the highest activation for this net/image
+}
+
+func ExpectSuccessfulRESTInference_sklearnMnistSvm(predictorName string) {
+	// the example model for FVT is an MNIST model provided as an example in
+	// the MLServer repo:
+	// https://github.com/SeldonIO/MLServer/tree/8925ad5/examples/sklearn
+
+	// this example model takes 8x8 floating point images as input flattened
+	// to a 64 float array
+	image := []float32{0.0, 0.0, 1.0, 11.0, 14.0, 15.0, 3.0, 0.0, 0.0, 1.0, 13.0, 16.0, 12.0, 16.0, 8.0, 0.0, 0.0, 8.0, 16.0, 4.0, 6.0, 16.0, 5.0, 0.0, 0.0, 5.0, 15.0, 11.0, 13.0, 14.0, 0.0, 0.0, 0.0, 0.0, 2.0, 12.0, 16.0, 13.0, 0.0, 0.0, 0.0, 0.0, 0.0, 13.0, 16.0, 16.0, 6.0, 0.0, 0.0, 0.0, 0.0, 16.0, 16.0, 16.0, 7.0, 0.0, 0.0, 0.0, 0.0, 11.0, 13.0, 12.0, 1.0, 0.0}
+
+	body := map[string]interface{}{
+		"inputs": []map[string]interface{}{
+			{
+				"name":     "predict",
+				"shape":    []int64{1, 64},
+				"datatype": "FP32",
+				"data":     image,
+			},
+		},
+	}
+
+	jsonBytes, err := json.Marshal(body)
+	Expect(err).ToNot(HaveOccurred())
+
+	inferResponse, err := FVTClientInstance.RunKfsRestInference(predictorName, jsonBytes, false)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(inferResponse).ToNot(BeNil())
+	Expect(inferResponse).To(ContainSubstring(`"model_name":"` + predictorName))
+	Expect(inferResponse).To(ContainSubstring(`"data":[8]`))
+}
+
+func ExpectSuccessfulRESTInference_xgboostMushroom(predictorName string, tls bool) {
+	body := map[string]interface{}{
+		"inputs": []map[string]interface{}{
+			{
+				"name":     "predict",
+				"shape":    []int64{1, 126},
+				"datatype": "FP32",
+				"data":     mushroomInputData,
+			},
+		},
+	}
+
+	jsonBytes, err := json.Marshal(body)
+	Expect(err).ToNot(HaveOccurred())
+
+	inferResponse, err := FVTClientInstance.RunKfsRestInference(predictorName, jsonBytes, tls)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(inferResponse).ToNot(BeNil())
+	Expect(inferResponse).To(ContainSubstring(`"model_name":"` + predictorName))
+	Expect(inferResponse).To(ContainSubstring(`"data":[0.0`))
 }
 
 // SKLearn MNIST SVM
@@ -106,7 +205,7 @@ func ExpectSuccessfulInference_sklearnMnistSvm(predictorName string) {
 	}
 
 	// run the inference
-	inferResponse, err := fvtClient.RunKfsInference(inferRequest)
+	inferResponse, err := FVTClientInstance.RunKfsInference(inferRequest)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(inferResponse).ToNot(BeNil())
 	Expect(inferResponse.ModelName).To(HavePrefix(predictorName))
@@ -133,11 +232,36 @@ func ExpectSuccessfulInference_tensorflowMnist(predictorName string) {
 	}
 
 	// First - run the inference
-	inferResponse, err := fvtClient.RunKfsInference(&inferRequest)
+	inferResponse, err := FVTClientInstance.RunKfsInference(&inferRequest)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(inferResponse).ToNot(BeNil())
 	Expect(inferResponse.ModelName).To(HavePrefix(predictorName))
 	Expect(inferResponse.RawOutputContents[0][0]).To(BeEquivalentTo(7))
+}
+
+// Keras MNIST
+// COS path: fvt/tensorflow/keras-mnist
+func ExpectSuccessfulInference_kerasMnist(predictorName string) {
+	image := []float32{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01176471, 0.07058824, 0.07058824, 0.07058824, 0.49411765, 0.53333336, 0.6862745, 0.10196079, 0.6509804, 1.0, 0.96862745, 0.49803922, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.11764706, 0.14117648, 0.36862746, 0.6039216, 0.6666667, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.88235295, 0.6745098, 0.99215686, 0.9490196, 0.7647059, 0.2509804, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.19215687, 0.93333334, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.9843137, 0.3647059, 0.32156864, 0.32156864, 0.21960784, 0.15294118, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07058824, 0.85882354, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.7764706, 0.7137255, 0.96862745, 0.94509804, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3137255, 0.6117647, 0.41960785, 0.99215686, 0.99215686, 0.8039216, 0.04313726, 0.0, 0.16862746, 0.6039216, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05490196, 0.00392157, 0.6039216, 0.99215686, 0.3529412, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.54509807, 0.99215686, 0.74509805, 0.00784314, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04313726, 0.74509805, 0.99215686, 0.27450982, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.13725491, 0.94509804, 0.88235295, 0.627451, 0.42352942, 0.00392157, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.31764707, 0.9411765, 0.99215686, 0.99215686, 0.46666667, 0.09803922, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1764706, 0.7294118, 0.99215686, 0.99215686, 0.5882353, 0.10588235, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0627451, 0.3647059, 0.9882353, 0.99215686, 0.73333335, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9764706, 0.99215686, 0.9764706, 0.2509804, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.18039216, 0.50980395, 0.7176471, 0.99215686, 0.99215686, 0.8117647, 0.00784314, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.15294118, 0.5803922, 0.8980392, 0.99215686, 0.99215686, 0.99215686, 0.98039216, 0.7137255, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.09411765, 0.44705883, 0.8666667, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.7882353, 0.30588236, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.09019608, 0.25882354, 0.8352941, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.7764706, 0.31764707, 0.00784314, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07058824, 0.67058825, 0.85882354, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.7647059, 0.3137255, 0.03529412, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.21568628, 0.6745098, 0.8862745, 0.99215686, 0.99215686, 0.99215686, 0.99215686, 0.95686275, 0.52156866, 0.04313726, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.53333336, 0.99215686, 0.99215686, 0.99215686, 0.83137256, 0.5294118, 0.5176471, 0.0627451, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
+
+	// build the grpc inference call
+	inferInput := &inference.ModelInferRequest_InferInputTensor{
+		Name:     "conv2d_input",
+		Shape:    []int64{1, 28, 28, 1},
+		Datatype: "FP32",
+		Contents: &inference.InferTensorContents{Fp32Contents: image},
+	}
+	inferRequest := inference.ModelInferRequest{
+		ModelName: predictorName,
+		Inputs:    []*inference.ModelInferRequest_InferInputTensor{inferInput},
+	}
+
+	// First - run the inference
+	inferResponse, err := FVTClientInstance.RunKfsInference(&inferRequest)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(inferResponse).ToNot(BeNil())
+	Expect(inferResponse.ModelName).To(HavePrefix(predictorName))
+	Expect(inferResponse.RawOutputContents[0][0]).To(BeEquivalentTo(91))
 }
 
 // LightGBM Mushroom
@@ -155,7 +279,7 @@ func ExpectSuccessfulInference_lightgbmMushroom(predictorName string) {
 		Inputs:    []*inference.ModelInferRequest_InferInputTensor{inferInput},
 	}
 
-	inferResponse, err := fvtClient.RunKfsInference(inferRequest)
+	inferResponse, err := FVTClientInstance.RunKfsInference(inferRequest)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(inferResponse).ToNot(BeNil())
 	// check that the model predicted a value close to 0
@@ -177,7 +301,7 @@ func ExpectSuccessfulInference_xgboostMushroom(predictorName string) {
 		Inputs:    []*inference.ModelInferRequest_InferInputTensor{inferInput},
 	}
 
-	inferResponse, err := fvtClient.RunKfsInference(inferRequest)
+	inferResponse, err := FVTClientInstance.RunKfsInference(inferRequest)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(inferResponse).ToNot(BeNil())
 	// check that the model predicted a value close to 0
@@ -189,7 +313,7 @@ func ExpectSuccessfulInference_xgboostMushroom(predictorName string) {
 var mushroomInputData []float32 = []float32{1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0}
 
 func LoadMnistImage(index int) []float32 {
-	images, err := mnist.LoadImageFile("testdata/t10k-images-idx3-ubyte.gz")
+	images, err := mnist.LoadImageFile(TestDataPath("t10k-images-idx3-ubyte.gz"))
 	Expect(err).ToNot(HaveOccurred())
 
 	imageBytes := [mnist.Width * mnist.Height]byte(*images[index])
@@ -201,7 +325,7 @@ func LoadMnistImage(index int) []float32 {
 }
 
 func LoadCifarImage(index int) []float32 {
-	file, err := os.Open("testdata/cifar_test_images.bin")
+	file, err := os.Open(TestDataPath("cifar_test_images.bin"))
 	Expect(err).ToNot(HaveOccurred())
 	images, err := cifar.Decode10(file)
 	Expect(err).ToNot(HaveOccurred())
@@ -219,6 +343,16 @@ func LoadCifarImage(index int) []float32 {
 	}
 
 	return imageFloat[:]
+}
+
+func convertFloatArrayToRawContent(in []float32) ([]byte, error) {
+	var buf bytes.Buffer
+
+	err := binary.Write(&buf, binary.LittleEndian, &in)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func convertRawOutputContentsTo10Floats(raw []byte) ([10]float32, error) {

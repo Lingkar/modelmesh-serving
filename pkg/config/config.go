@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -40,8 +42,9 @@ const (
 	EnvEtcdSecretName     = "ETCD_SECRET_NAME"
 	DefaultEtcdSecretName = "model-serving-etcd"
 
-	ConfigType    = "yaml"
-	MountLocation = "/etc/model-serving/config-defaults.yaml"
+	ConfigType        = "yaml"
+	MountLocation     = "/etc/model-serving/config/default"
+	ViperKeyDelimiter = "::"
 )
 
 var (
@@ -71,11 +74,17 @@ type Config struct {
 	PodsPerRuntime         uint16
 	StorageSecretName      string
 	EnableAccessLogging    bool
+	BuiltInServerTypes     []string
 
 	ServiceAccountName string
 
 	Metrics     PrometheusConfig
 	ScaleToZero ScaleToZeroConfig
+
+	RuntimePodLabels      map[string]string
+	RuntimePodAnnotations map[string]string
+
+	ImagePullSecrets []corev1.LocalObjectReference
 
 	// For internal use only
 	InternalModelMeshEnvVars EnvVarList
@@ -325,16 +334,23 @@ func defaults(v *viper.Viper) {
 	v.SetDefault("PodsPerRuntime", 2)
 	v.SetDefault("StorageSecretName", "storage-config")
 	v.SetDefault("ServiceAccountName", "")
-	v.SetDefault("Metrics.Port", 2112)
-	v.SetDefault("Metrics.Scheme", "https")
-	v.SetDefault("ScaleToZero.Enabled", true)
-	v.SetDefault("ScaleToZero.GracePeriodSeconds", 60)
+	v.SetDefault(concatStringsWithDelimiter([]string{"Metrics", "Port"}), 2112)
+	v.SetDefault(concatStringsWithDelimiter([]string{"Metrics", "Scheme"}), "https")
+	v.SetDefault(concatStringsWithDelimiter([]string{"ScaleToZero", "Enabled"}), true)
+	v.SetDefault(concatStringsWithDelimiter([]string{"ScaleToZero", "GracePeriodSeconds"}), 60)
 	// default size 16MiB in bytes
 	v.SetDefault("GrpcMaxMessageSizeBytes", 16777216)
+	v.SetDefault("BuiltInServerTypes", []string{
+		string(kserveapi.MLServer), string(kserveapi.Triton), string(kserveapi.OVMS), "torchserve",
+	})
+}
+
+func concatStringsWithDelimiter(elems []string) string {
+	return strings.Join(elems, ViperKeyDelimiter)
 }
 
 func init() {
-	defaultConfig = viper.New()
+	defaultConfig = viper.NewWithOptions(viper.KeyDelimiter(ViperKeyDelimiter))
 
 	defaults(defaultConfig)
 
@@ -367,7 +383,7 @@ func NewMergedConfigFromConfigMap(m corev1.ConfigMap) (*Config, error) {
 func NewMergedConfigFromString(configYaml string) (*Config, error) {
 	var err error
 
-	v := viper.New()
+	v := viper.NewWithOptions(viper.KeyDelimiter(ViperKeyDelimiter))
 	v.SetConfigType(ConfigType)
 	for _, key := range defaultConfig.AllKeys() {
 		v.SetDefault(key, defaultConfig.Get(key))
@@ -381,14 +397,9 @@ func NewMergedConfigFromString(configYaml string) (*Config, error) {
 	// Even if the default config has an image digest, a user should be able to
 	// override it with a tag (ignoring the default digest)
 	// HACK: There should be a better way to do this...
-	if v.GetString("storageHelperImage.tag") != defaultConfig.GetString("storageHelperImage.tag") &&
-		v.GetString("storageHelperImage.digest") == defaultConfig.GetString("storageHelperImage.digest") {
-		v.Set("storageHelperImage.digest", "")
-	}
-	if v.GetString("modelMeshImage.tag") != defaultConfig.GetString("modelMeshImage.tag") &&
-		v.GetString("modelMeshImage.digest") == defaultConfig.GetString("modelMeshImage.digest") {
-		v.Set("modelMeshImage.digest", "")
-	}
+	clearDigestIfTagsDiffer(v, "modelMeshImage")
+	clearDigestIfTagsDiffer(v, "storageHelperImage")
+	clearDigestIfTagsDiffer(v, "restProxy.image")
 
 	// unmarshal the config into a Config struct
 	var config Config
@@ -410,4 +421,11 @@ func NewMergedConfigFromString(configYaml string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+func clearDigestIfTagsDiffer(v *viper.Viper, imageConfigField string) {
+	tag, digest := imageConfigField+".tag", imageConfigField+".digest"
+	if v.GetString(tag) != defaultConfig.GetString(tag) && v.GetString(digest) == defaultConfig.GetString(digest) {
+		v.Set(digest, "")
+	}
 }

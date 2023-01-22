@@ -11,7 +11,6 @@ spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      component: model-mesh
       modelmesh-service: modelmesh-serving
       name: modelmesh-serving-mlserver-0.x
   strategy:
@@ -31,10 +30,8 @@ spec:
         app.kubernetes.io/instance: modelmesh-controller
         app.kubernetes.io/managed-by: modelmesh-controller
         app.kubernetes.io/name: modelmesh-controller
-        component: model-mesh
         modelmesh-service: modelmesh-serving
         name: modelmesh-serving-mlserver-0.x
-        network-policy: allow-egress
     spec:
       affinity:
         nodeAffinity:
@@ -46,6 +43,97 @@ spec:
                 values:
                 - amd64
       containers:
+      - command:
+        - /opt/app/mlserver-adapter
+        env:
+        - name: ADAPTER_PORT
+          value: "8085"
+        - name: RUNTIME_PORT
+          value: "8001"
+        - name: RUNTIME_DATA_ENDPOINT
+          value: port:8001
+        - name: CONTAINER_MEM_REQ_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: mlserver
+              divisor: "0"
+              resource: requests.memory
+        - name: MEM_BUFFER_BYTES
+          value: "134217728"
+        - name: LOADTIME_TIMEOUT
+          value: "90000"
+        - name: USE_EMBEDDED_PULLER
+          value: "true"
+        - name: RUNTIME_VERSION
+          value: replace
+        image: image:tag
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: mlserver-adapter
+        resources:
+          limits:
+            cpu: "2"
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
+        - mountPath: /storage-config
+          name: storage-config
+          readOnly: true
+      - env:
+        - name: MLSERVER_MODELS_DIR
+          value: /models/_mlserver_models/
+        - name: MLSERVER_GRPC_PORT
+          value: "8001"
+        - name: MLSERVER_HTTP_PORT
+          value: "8002"
+        - name: MLSERVER_LOAD_MODELS_AT_STARTUP
+          value: "false"
+        - name: MLSERVER_MODEL_NAME
+          value: dummy-model-fixme
+        - name: MLSERVER_HOST
+          value: 127.0.0.1
+        - name: MLSERVER_GRPC_MAX_MESSAGE_LENGTH
+          value: "-1"
+        image: mlserver-0:replace
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: mlserver
+        resources:
+          limits:
+            cpu: "5"
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
       - env:
         - name: MM_SERVICE_NAME
           value: modelmesh-serving
@@ -83,7 +171,7 @@ spec:
         - name: MM_DEFAULT_VMODEL_OWNER
           value: ksp
         - name: MM_LABELS
-          value: mt:lightgbm,mt:lightgbm:3,mt:sklearn,mt:sklearn:0,mt:xgboost,mt:xgboost:1,rt:mlserver-0.x
+          value: mt:lightgbm,mt:lightgbm:3,mt:sklearn,mt:sklearn:0,mt:xgboost,mt:xgboost:1,pv:grpc-v2,rt:mlserver-0.x
         - name: MM_TYPE_CONSTRAINTS_PATH
           value: /etc/watson/mmesh/config/type_constraints
         - name: MM_DATAPLANE_CONFIG_PATH
@@ -143,6 +231,92 @@ spec:
         - mountPath: /opt/kserve/mmesh/etcd
           name: etcd-config
           readOnly: true
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 90
+      volumes:
+      - emptyDir:
+          sizeLimit: 1536Mi
+        name: models-dir
+      - name: storage-config
+        secret:
+          defaultMode: 420
+          secretName: storage-config
+      - configMap:
+          defaultMode: 420
+          name: tc-config
+        name: tc-config
+      - name: etcd-config
+        secret:
+          defaultMode: 420
+          secretName: secret
+status: {}
+'''
+"REST Proxy configuration deployment should contain REST Proxy container and extra v2 protocol label" = '''
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      modelmesh-service: modelmesh-serving
+      name: modelmesh-serving-mlserver-0.x
+  strategy:
+    rollingUpdate:
+      maxSurge: 75%
+      maxUnavailable: 15%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/instance: modelmesh-controller
+        app.kubernetes.io/managed-by: modelmesh-controller
+        app.kubernetes.io/name: modelmesh-controller
+        modelmesh-service: modelmesh-serving
+        name: modelmesh-serving-mlserver-0.x
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+      containers:
+      - env:
+        - name: REST_PROXY_LISTEN_PORT
+          value: "8008"
+        - name: REST_PROXY_GRPC_PORT
+          value: "1234"
+        - name: REST_PROXY_USE_TLS
+          value: "false"
+        - name: REST_PROXY_GRPC_MAX_MSG_SIZE_BYTES
+          value: "16777216"
+        image: kserve/rest-proxy:latest
+        imagePullPolicy: Always
+        name: rest-proxy
+        ports:
+        - containerPort: 8008
+          name: http
+          protocol: TCP
+        resources:
+          limits:
+            cpu: "1"
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
       - env:
         - name: MLSERVER_MODELS_DIR
           value: /models/_mlserver_models/
@@ -157,7 +331,7 @@ spec:
         - name: MLSERVER_HOST
           value: 127.0.0.1
         - name: MLSERVER_GRPC_MAX_MESSAGE_LENGTH
-          value: "16777216"
+          value: "-1"
         image: mlserver-0:replace
         imagePullPolicy: IfNotPresent
         lifecycle:
@@ -190,6 +364,8 @@ spec:
           value: "8085"
         - name: RUNTIME_PORT
           value: "8001"
+        - name: RUNTIME_DATA_ENDPOINT
+          value: port:8001
         - name: CONTAINER_MEM_REQ_BYTES
           valueFrom:
             resourceFieldRef:
@@ -232,70 +408,6 @@ spec:
         - mountPath: /storage-config
           name: storage-config
           readOnly: true
-      dnsPolicy: ClusterFirst
-      restartPolicy: Always
-      schedulerName: default-scheduler
-      securityContext: {}
-      terminationGracePeriodSeconds: 90
-      volumes:
-      - emptyDir:
-          sizeLimit: 1536Mi
-        name: models-dir
-      - name: storage-config
-        secret:
-          defaultMode: 420
-          secretName: storage-config
-      - configMap:
-          defaultMode: 420
-          name: tc-config
-        name: tc-config
-      - name: etcd-config
-        secret:
-          defaultMode: 420
-          secretName: secret
-status: {}
-'''
-"REST Proxy configuration deployment should contain REST Proxy container" = '''
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  creationTimestamp: null
-spec:
-  progressDeadlineSeconds: 600
-  replicas: 2
-  revisionHistoryLimit: 10
-  selector:
-    matchLabels:
-      component: model-mesh
-      modelmesh-service: modelmesh-serving
-      name: modelmesh-serving-mlserver-0.x
-  strategy:
-    rollingUpdate:
-      maxSurge: 75%
-      maxUnavailable: 15%
-    type: RollingUpdate
-  template:
-    metadata:
-      creationTimestamp: null
-      labels:
-        app.kubernetes.io/instance: modelmesh-controller
-        app.kubernetes.io/managed-by: modelmesh-controller
-        app.kubernetes.io/name: modelmesh-controller
-        component: model-mesh
-        modelmesh-service: modelmesh-serving
-        name: modelmesh-serving-mlserver-0.x
-        network-policy: allow-egress
-    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: kubernetes.io/arch
-                operator: In
-                values:
-                - amd64
-      containers:
       - env:
         - name: MM_SERVICE_NAME
           value: modelmesh-serving
@@ -333,7 +445,7 @@ spec:
         - name: MM_DEFAULT_VMODEL_OWNER
           value: ksp
         - name: MM_LABELS
-          value: mt:lightgbm,mt:lightgbm:3,mt:sklearn,mt:sklearn:0,mt:xgboost,mt:xgboost:1,rt:mlserver-0.x
+          value: mt:lightgbm,mt:lightgbm:3,mt:sklearn,mt:sklearn:0,mt:xgboost,mt:xgboost:1,pv:grpc-v2,pv:v2,rt:mlserver-0.x
         - name: MM_TYPE_CONSTRAINTS_PATH
           value: /etc/watson/mmesh/config/type_constraints
         - name: MM_DATAPLANE_CONFIG_PATH
@@ -390,120 +502,6 @@ spec:
         - mountPath: /opt/kserve/mmesh/etcd
           name: etcd-config
           readOnly: true
-      - env:
-        - name: MLSERVER_MODELS_DIR
-          value: /models/_mlserver_models/
-        - name: MLSERVER_GRPC_PORT
-          value: "8001"
-        - name: MLSERVER_HTTP_PORT
-          value: "8002"
-        - name: MLSERVER_LOAD_MODELS_AT_STARTUP
-          value: "false"
-        - name: MLSERVER_MODEL_NAME
-          value: dummy-model-fixme
-        - name: MLSERVER_HOST
-          value: 127.0.0.1
-        - name: MLSERVER_GRPC_MAX_MESSAGE_LENGTH
-          value: "16777216"
-        image: mlserver-0:replace
-        imagePullPolicy: IfNotPresent
-        lifecycle:
-          preStop:
-            httpGet:
-              path: /prestop
-              port: 8090
-              scheme: HTTP
-        name: mlserver
-        resources:
-          limits:
-            cpu: "5"
-            memory: 1Gi
-          requests:
-            cpu: 500m
-            memory: 1Gi
-        securityContext:
-          capabilities:
-            drop:
-            - ALL
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /models
-          name: models-dir
-      - command:
-        - /opt/app/mlserver-adapter
-        env:
-        - name: ADAPTER_PORT
-          value: "8085"
-        - name: RUNTIME_PORT
-          value: "8001"
-        - name: CONTAINER_MEM_REQ_BYTES
-          valueFrom:
-            resourceFieldRef:
-              containerName: mlserver
-              divisor: "0"
-              resource: requests.memory
-        - name: MEM_BUFFER_BYTES
-          value: "134217728"
-        - name: LOADTIME_TIMEOUT
-          value: "90000"
-        - name: USE_EMBEDDED_PULLER
-          value: "true"
-        - name: RUNTIME_VERSION
-          value: replace
-        image: image:tag
-        imagePullPolicy: IfNotPresent
-        lifecycle:
-          preStop:
-            httpGet:
-              path: /prestop
-              port: 8090
-              scheme: HTTP
-        name: mlserver-adapter
-        resources:
-          limits:
-            cpu: "2"
-            memory: 512Mi
-          requests:
-            cpu: 50m
-            memory: 96Mi
-        securityContext:
-          capabilities:
-            drop:
-            - ALL
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /models
-          name: models-dir
-        - mountPath: /storage-config
-          name: storage-config
-          readOnly: true
-      - env:
-        - name: REST_PROXY_LISTEN_PORT
-          value: "8008"
-        - name: REST_PROXY_GRPC_PORT
-          value: "1234"
-        - name: REST_PROXY_USE_TLS
-          value: "false"
-        - name: REST_PROXY_GRPC_MAX_MSG_SIZE_BYTES
-          value: "16777216"
-        image: kserve/rest-proxy:latest
-        imagePullPolicy: Always
-        name: rest-proxy
-        ports:
-        - containerPort: 8008
-          name: http
-          protocol: TCP
-        resources:
-          limits:
-            cpu: "1"
-            memory: 512Mi
-          requests:
-            cpu: 50m
-            memory: 96Mi
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler
@@ -538,7 +536,6 @@ spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      component: model-mesh
       modelmesh-service: modelmesh-serving
       name: modelmesh-serving-mlserver-0.x
   strategy:
@@ -553,10 +550,8 @@ spec:
         app.kubernetes.io/instance: modelmesh-controller
         app.kubernetes.io/managed-by: modelmesh-controller
         app.kubernetes.io/name: modelmesh-controller
-        component: model-mesh
         modelmesh-service: modelmesh-serving
         name: modelmesh-serving-mlserver-0.x
-        network-policy: allow-egress
     spec:
       affinity:
         nodeAffinity:
@@ -568,6 +563,97 @@ spec:
                 values:
                 - amd64
       containers:
+      - command:
+        - /opt/app/mlserver-adapter
+        env:
+        - name: ADAPTER_PORT
+          value: "8085"
+        - name: RUNTIME_PORT
+          value: "8001"
+        - name: RUNTIME_DATA_ENDPOINT
+          value: port:8001
+        - name: CONTAINER_MEM_REQ_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: mlserver
+              divisor: "0"
+              resource: requests.memory
+        - name: MEM_BUFFER_BYTES
+          value: "134217728"
+        - name: LOADTIME_TIMEOUT
+          value: "90000"
+        - name: USE_EMBEDDED_PULLER
+          value: "true"
+        - name: RUNTIME_VERSION
+          value: replace
+        image: image:tag
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: mlserver-adapter
+        resources:
+          limits:
+            cpu: "2"
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
+        - mountPath: /storage-config
+          name: storage-config
+          readOnly: true
+      - env:
+        - name: MLSERVER_MODELS_DIR
+          value: /models/_mlserver_models/
+        - name: MLSERVER_GRPC_PORT
+          value: "8001"
+        - name: MLSERVER_HTTP_PORT
+          value: "8002"
+        - name: MLSERVER_LOAD_MODELS_AT_STARTUP
+          value: "false"
+        - name: MLSERVER_MODEL_NAME
+          value: dummy-model-fixme
+        - name: MLSERVER_HOST
+          value: 127.0.0.1
+        - name: MLSERVER_GRPC_MAX_MESSAGE_LENGTH
+          value: "-1"
+        image: mlserver-0:replace
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: mlserver
+        resources:
+          limits:
+            cpu: "5"
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
       - env:
         - name: MM_SERVICE_NAME
           value: modelmesh-serving
@@ -605,7 +691,7 @@ spec:
         - name: MM_DEFAULT_VMODEL_OWNER
           value: ksp
         - name: MM_LABELS
-          value: mt:lightgbm,mt:lightgbm:3,mt:sklearn,mt:sklearn:0,mt:xgboost,mt:xgboost:1,rt:mlserver-0.x
+          value: mt:lightgbm,mt:lightgbm:3,mt:sklearn,mt:sklearn:0,mt:xgboost,mt:xgboost:1,pv:grpc-v2,rt:mlserver-0.x
         - name: MM_TYPE_CONSTRAINTS_PATH
           value: /etc/watson/mmesh/config/type_constraints
         - name: MM_DATAPLANE_CONFIG_PATH
@@ -662,57 +748,80 @@ spec:
         - mountPath: /opt/kserve/mmesh/etcd
           name: etcd-config
           readOnly: true
-      - env:
-        - name: MLSERVER_MODELS_DIR
-          value: /models/_mlserver_models/
-        - name: MLSERVER_GRPC_PORT
-          value: "8001"
-        - name: MLSERVER_HTTP_PORT
-          value: "8002"
-        - name: MLSERVER_LOAD_MODELS_AT_STARTUP
-          value: "false"
-        - name: MLSERVER_MODEL_NAME
-          value: dummy-model-fixme
-        - name: MLSERVER_HOST
-          value: 127.0.0.1
-        - name: MLSERVER_GRPC_MAX_MESSAGE_LENGTH
-          value: "16777216"
-        image: mlserver-0:replace
-        imagePullPolicy: IfNotPresent
-        lifecycle:
-          preStop:
-            httpGet:
-              path: /prestop
-              port: 8090
-              scheme: HTTP
-        name: mlserver
-        resources:
-          limits:
-            cpu: "5"
-            memory: 1Gi
-          requests:
-            cpu: 500m
-            memory: 1Gi
-        securityContext:
-          capabilities:
-            drop:
-            - ALL
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /models
-          name: models-dir
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 90
+      volumes:
+      - emptyDir:
+          sizeLimit: 1536Mi
+        name: models-dir
+      - name: storage-config
+        secret:
+          defaultMode: 420
+          secretName: storage-config
+      - configMap:
+          defaultMode: 420
+          name: tc-config
+        name: tc-config
+      - name: etcd-config
+        secret:
+          defaultMode: 420
+          secretName: secret
+status: {}
+'''
+"Sample Runtime config/runtimes/ovms-1.x.yaml should be a valid runtime specification" = '''
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      modelmesh-service: modelmesh-serving
+      name: modelmesh-serving-ovms-1.x
+  strategy:
+    rollingUpdate:
+      maxSurge: 75%
+      maxUnavailable: 15%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/instance: modelmesh-controller
+        app.kubernetes.io/managed-by: modelmesh-controller
+        app.kubernetes.io/name: modelmesh-controller
+        modelmesh-service: modelmesh-serving
+        name: modelmesh-serving-ovms-1.x
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+      containers:
       - command:
-        - /opt/app/mlserver-adapter
+        - /opt/app/ovms-adapter
         env:
         - name: ADAPTER_PORT
           value: "8085"
         - name: RUNTIME_PORT
-          value: "8001"
+          value: "8888"
+        - name: RUNTIME_DATA_ENDPOINT
+          value: port:8001
         - name: CONTAINER_MEM_REQ_BYTES
           valueFrom:
             resourceFieldRef:
-              containerName: mlserver
+              containerName: ovms
               divisor: "0"
               resource: requests.memory
         - name: MEM_BUFFER_BYTES
@@ -731,7 +840,7 @@ spec:
               path: /prestop
               port: 8090
               scheme: HTTP
-        name: mlserver-adapter
+        name: ovms-adapter
         resources:
           limits:
             cpu: "2"
@@ -750,6 +859,373 @@ spec:
           name: models-dir
         - mountPath: /storage-config
           name: storage-config
+          readOnly: true
+      - args:
+        - --port=8001
+        - --rest_port=8888
+        - --config_path=/models/model_config_list.json
+        - --file_system_poll_wait_seconds=0
+        - --grpc_bind_address=127.0.0.1
+        - --rest_bind_address=127.0.0.1
+        image: ovms-1:replace
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: ovms
+        resources:
+          limits:
+            cpu: "5"
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
+      - env:
+        - name: MM_SERVICE_NAME
+          value: modelmesh-serving
+        - name: MM_SVC_GRPC_PORT
+          value: "1234"
+        - name: WKUBE_POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: WKUBE_POD_IPADDR
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: MM_LOCATION
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.hostIP
+        - name: KV_STORE
+          value: etcd:/opt/kserve/mmesh/etcd/etcd_connection
+        - name: MM_METRICS
+          value: disabled
+        - name: SHUTDOWN_TIMEOUT_MS
+          value: "90000"
+        - name: INTERNAL_SERVING_GRPC_PORT
+          value: "8001"
+        - name: INTERNAL_GRPC_PORT
+          value: "8085"
+        - name: MM_SVC_GRPC_MAX_MSG_SIZE
+          value: "16777216"
+        - name: MM_KVSTORE_PREFIX
+          value: mm
+        - name: MM_DEFAULT_VMODEL_OWNER
+          value: ksp
+        - name: MM_LABELS
+          value: mt:openvino_ir,mt:openvino_ir:opset1,pv:grpc-v1,rt:ovms-1.x
+        - name: MM_TYPE_CONSTRAINTS_PATH
+          value: /etc/watson/mmesh/config/type_constraints
+        - name: MM_DATAPLANE_CONFIG_PATH
+          value: /etc/watson/mmesh/config/dataplane_api_config
+        image: image:tag
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /opt/kserve/mmesh/stop.sh
+              - wait
+        livenessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /live
+            port: 8089
+            scheme: HTTP
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: mm
+        ports:
+        - containerPort: 1234
+          name: grpc
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ready
+            port: 8089
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "3"
+            memory: 448Mi
+          requests:
+            cpu: 300m
+            memory: 448Mi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/watson/mmesh/config
+          name: tc-config
+        - mountPath: /opt/kserve/mmesh/etcd
+          name: etcd-config
+          readOnly: true
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 90
+      volumes:
+      - emptyDir:
+          sizeLimit: 1536Mi
+        name: models-dir
+      - name: storage-config
+        secret:
+          defaultMode: 420
+          secretName: storage-config
+      - configMap:
+          defaultMode: 420
+          name: tc-config
+        name: tc-config
+      - name: etcd-config
+        secret:
+          defaultMode: 420
+          secretName: secret
+status: {}
+'''
+"Sample Runtime config/runtimes/torchserve-0.x.yaml should be a valid runtime specification" = '''
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      modelmesh-service: modelmesh-serving
+      name: modelmesh-serving-torchserve-0.x
+  strategy:
+    rollingUpdate:
+      maxSurge: 75%
+      maxUnavailable: 15%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/instance: modelmesh-controller
+        app.kubernetes.io/managed-by: modelmesh-controller
+        app.kubernetes.io/name: modelmesh-controller
+        modelmesh-service: modelmesh-serving
+        name: modelmesh-serving-torchserve-0.x
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+      containers:
+      - command:
+        - /opt/app/torchserve-adapter
+        env:
+        - name: ADAPTER_PORT
+          value: "8085"
+        - name: RUNTIME_PORT
+          value: "7071"
+        - name: RUNTIME_DATA_ENDPOINT
+          value: port:7070
+        - name: CONTAINER_MEM_REQ_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: torchserve
+              divisor: "0"
+              resource: requests.memory
+        - name: MEM_BUFFER_BYTES
+          value: "134217728"
+        - name: LOADTIME_TIMEOUT
+          value: "90000"
+        - name: USE_EMBEDDED_PULLER
+          value: "true"
+        - name: RUNTIME_VERSION
+          value: replace
+        image: image:tag
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: torchserve-adapter
+        resources:
+          limits:
+            cpu: "2"
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
+        - mountPath: /storage-config
+          name: storage-config
+          readOnly: true
+      - args:
+        - while [ ! -e "$TS_CONFIG_FILE" ]; do echo "waiting for config file...";
+          sleep 1; done;
+        - exec
+        - torchserve
+        - --start
+        - --foreground
+        env:
+        - name: TS_CONFIG_FILE
+          value: /models/_torchserve_models/mmconfig.properties
+        image: torchserve-0:replace
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: torchserve
+        resources:
+          limits:
+            cpu: "5"
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
+      - env:
+        - name: MM_SERVICE_NAME
+          value: modelmesh-serving
+        - name: MM_SVC_GRPC_PORT
+          value: "1234"
+        - name: WKUBE_POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: WKUBE_POD_IPADDR
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: MM_LOCATION
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.hostIP
+        - name: KV_STORE
+          value: etcd:/opt/kserve/mmesh/etcd/etcd_connection
+        - name: MM_METRICS
+          value: disabled
+        - name: SHUTDOWN_TIMEOUT_MS
+          value: "90000"
+        - name: INTERNAL_SERVING_GRPC_PORT
+          value: "7070"
+        - name: INTERNAL_GRPC_PORT
+          value: "8085"
+        - name: MM_SVC_GRPC_MAX_MSG_SIZE
+          value: "16777216"
+        - name: MM_KVSTORE_PREFIX
+          value: mm
+        - name: MM_DEFAULT_VMODEL_OWNER
+          value: ksp
+        - name: MM_LABELS
+          value: mt:pytorch-mar,mt:pytorch-mar:0,rt:torchserve-0.x
+        - name: MM_TYPE_CONSTRAINTS_PATH
+          value: /etc/watson/mmesh/config/type_constraints
+        - name: MM_DATAPLANE_CONFIG_PATH
+          value: /etc/watson/mmesh/config/dataplane_api_config
+        image: image:tag
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /opt/kserve/mmesh/stop.sh
+              - wait
+        livenessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /live
+            port: 8089
+            scheme: HTTP
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: mm
+        ports:
+        - containerPort: 1234
+          name: grpc
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ready
+            port: 8089
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "3"
+            memory: 448Mi
+          requests:
+            cpu: 300m
+            memory: 448Mi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/watson/mmesh/config
+          name: tc-config
+        - mountPath: /opt/kserve/mmesh/etcd
+          name: etcd-config
           readOnly: true
       dnsPolicy: ClusterFirst
       restartPolicy: Always
@@ -785,7 +1261,6 @@ spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      component: model-mesh
       modelmesh-service: modelmesh-serving
       name: modelmesh-serving-triton-2.x
   strategy:
@@ -800,10 +1275,8 @@ spec:
         app.kubernetes.io/instance: modelmesh-controller
         app.kubernetes.io/managed-by: modelmesh-controller
         app.kubernetes.io/name: modelmesh-controller
-        component: model-mesh
         modelmesh-service: modelmesh-serving
         name: modelmesh-serving-triton-2.x
-        network-policy: allow-egress
     spec:
       affinity:
         nodeAffinity:
@@ -815,88 +1288,47 @@ spec:
                 values:
                 - amd64
       containers:
-      - env:
-        - name: MM_SERVICE_NAME
-          value: modelmesh-serving
-        - name: MM_SVC_GRPC_PORT
-          value: "1234"
-        - name: WKUBE_POD_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: metadata.name
-        - name: WKUBE_POD_IPADDR
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: status.podIP
-        - name: MM_LOCATION
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: status.hostIP
-        - name: KV_STORE
-          value: etcd:/opt/kserve/mmesh/etcd/etcd_connection
-        - name: MM_METRICS
-          value: disabled
-        - name: SHUTDOWN_TIMEOUT_MS
-          value: "90000"
-        - name: INTERNAL_SERVING_GRPC_PORT
-          value: "8001"
-        - name: INTERNAL_GRPC_PORT
+      - command:
+        - /opt/app/triton-adapter
+        env:
+        - name: ADAPTER_PORT
           value: "8085"
-        - name: MM_SVC_GRPC_MAX_MSG_SIZE
-          value: "16777216"
-        - name: MM_KVSTORE_PREFIX
-          value: mm
-        - name: MM_DEFAULT_VMODEL_OWNER
-          value: ksp
-        - name: MM_LABELS
-          value: mt:keras,mt:keras:2,mt:onnx,mt:onnx:1,mt:pytorch,mt:pytorch:1,mt:tensorflow,mt:tensorflow:1,mt:tensorflow:2,mt:tensorrt,mt:tensorrt:7,rt:triton-2.x
-        - name: MM_TYPE_CONSTRAINTS_PATH
-          value: /etc/watson/mmesh/config/type_constraints
-        - name: MM_DATAPLANE_CONFIG_PATH
-          value: /etc/watson/mmesh/config/dataplane_api_config
+        - name: RUNTIME_PORT
+          value: "8001"
+        - name: RUNTIME_DATA_ENDPOINT
+          value: port:8001
+        - name: CONTAINER_MEM_REQ_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: triton
+              divisor: "0"
+              resource: requests.memory
+        - name: MEM_BUFFER_BYTES
+          value: "134217728"
+        - name: LOADTIME_TIMEOUT
+          value: "90000"
+        - name: USE_EMBEDDED_PULLER
+          value: "true"
+        - name: RUNTIME_VERSION
+          value: replace
+        - name: LOADING_CONCURRENCY
+          value: "2"
         image: image:tag
         imagePullPolicy: IfNotPresent
         lifecycle:
           preStop:
-            exec:
-              command:
-              - /opt/kserve/mmesh/stop.sh
-              - wait
-        livenessProbe:
-          failureThreshold: 2
-          httpGet:
-            path: /live
-            port: 8089
-            scheme: HTTP
-          initialDelaySeconds: 90
-          periodSeconds: 30
-          successThreshold: 1
-          timeoutSeconds: 5
-        name: mm
-        ports:
-        - containerPort: 1234
-          name: grpc
-          protocol: TCP
-        readinessProbe:
-          failureThreshold: 3
-          httpGet:
-            path: /ready
-            port: 8089
-            scheme: HTTP
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          successThreshold: 1
-          timeoutSeconds: 1
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: triton-adapter
         resources:
           limits:
-            cpu: "3"
-            memory: 448Mi
+            cpu: "2"
+            memory: 512Mi
           requests:
-            cpu: 300m
-            memory: 448Mi
+            cpu: 50m
+            memory: 96Mi
         securityContext:
           capabilities:
             drop:
@@ -904,10 +1336,10 @@ spec:
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:
-        - mountPath: /etc/watson/mmesh/config
-          name: tc-config
-        - mountPath: /opt/kserve/mmesh/etcd
-          name: etcd-config
+        - mountPath: /models
+          name: models-dir
+        - mountPath: /storage-config
+          name: storage-config
           readOnly: true
       - args:
         - -c
@@ -957,45 +1389,88 @@ spec:
         volumeMounts:
         - mountPath: /models
           name: models-dir
-      - command:
-        - /opt/app/triton-adapter
-        env:
-        - name: ADAPTER_PORT
-          value: "8085"
-        - name: RUNTIME_PORT
-          value: "8001"
-        - name: CONTAINER_MEM_REQ_BYTES
+      - env:
+        - name: MM_SERVICE_NAME
+          value: modelmesh-serving
+        - name: MM_SVC_GRPC_PORT
+          value: "1234"
+        - name: WKUBE_POD_NAME
           valueFrom:
-            resourceFieldRef:
-              containerName: triton
-              divisor: "0"
-              resource: requests.memory
-        - name: MEM_BUFFER_BYTES
-          value: "134217728"
-        - name: LOADTIME_TIMEOUT
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: WKUBE_POD_IPADDR
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: MM_LOCATION
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.hostIP
+        - name: KV_STORE
+          value: etcd:/opt/kserve/mmesh/etcd/etcd_connection
+        - name: MM_METRICS
+          value: disabled
+        - name: SHUTDOWN_TIMEOUT_MS
           value: "90000"
-        - name: USE_EMBEDDED_PULLER
-          value: "true"
-        - name: RUNTIME_VERSION
-          value: replace
-        - name: LOADING_CONCURRENCY
-          value: "2"
+        - name: INTERNAL_SERVING_GRPC_PORT
+          value: "8001"
+        - name: INTERNAL_GRPC_PORT
+          value: "8085"
+        - name: MM_SVC_GRPC_MAX_MSG_SIZE
+          value: "16777216"
+        - name: MM_KVSTORE_PREFIX
+          value: mm
+        - name: MM_DEFAULT_VMODEL_OWNER
+          value: ksp
+        - name: MM_LABELS
+          value: mt:keras,mt:keras:2,mt:onnx,mt:onnx:1,mt:pytorch,mt:pytorch:1,mt:tensorflow,mt:tensorflow:1,mt:tensorflow:2,mt:tensorrt,mt:tensorrt:7,pv:grpc-v2,rt:triton-2.x
+        - name: MM_TYPE_CONSTRAINTS_PATH
+          value: /etc/watson/mmesh/config/type_constraints
+        - name: MM_DATAPLANE_CONFIG_PATH
+          value: /etc/watson/mmesh/config/dataplane_api_config
         image: image:tag
         imagePullPolicy: IfNotPresent
         lifecycle:
           preStop:
-            httpGet:
-              path: /prestop
-              port: 8090
-              scheme: HTTP
-        name: triton-adapter
+            exec:
+              command:
+              - /opt/kserve/mmesh/stop.sh
+              - wait
+        livenessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /live
+            port: 8089
+            scheme: HTTP
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: mm
+        ports:
+        - containerPort: 1234
+          name: grpc
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ready
+            port: 8089
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
         resources:
           limits:
-            cpu: "2"
-            memory: 512Mi
+            cpu: "3"
+            memory: 448Mi
           requests:
-            cpu: 50m
-            memory: 96Mi
+            cpu: 300m
+            memory: 448Mi
         securityContext:
           capabilities:
             drop:
@@ -1003,10 +1478,10 @@ spec:
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:
-        - mountPath: /models
-          name: models-dir
-        - mountPath: /storage-config
-          name: storage-config
+        - mountPath: /etc/watson/mmesh/config
+          name: tc-config
+        - mountPath: /opt/kserve/mmesh/etcd
+          name: etcd-config
           readOnly: true
       dnsPolicy: ClusterFirst
       restartPolicy: Always
@@ -1042,7 +1517,6 @@ spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      component: model-mesh
       modelmesh-service: modelmesh-serving
       name: modelmesh-serving-custom-runtime-pullerless
   strategy:
@@ -1057,10 +1531,8 @@ spec:
         app.kubernetes.io/instance: modelmesh-controller
         app.kubernetes.io/managed-by: modelmesh-controller
         app.kubernetes.io/name: modelmesh-controller
-        component: model-mesh
         modelmesh-service: modelmesh-serving
         name: modelmesh-serving-custom-runtime-pullerless
-        network-policy: allow-egress
     spec:
       affinity:
         nodeAffinity:
@@ -1072,6 +1544,40 @@ spec:
                 values:
                 - amd64
       containers:
+      - env:
+        - name: MODEL_DIRECTORY_PATH
+          value: /models
+        - name: MODEL_SERVER_MEM_REQ_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: modelserver
+              divisor: "0"
+              resource: requests.memory
+        image: seldonio/mlserver:0.3.2
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            httpGet:
+              path: /prestop
+              port: 8090
+              scheme: HTTP
+        name: modelserver
+        resources:
+          limits:
+            cpu: "5"
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /models
+          name: models-dir
       - env:
         - name: MM_SERVICE_NAME
           value: modelmesh-serving
@@ -1166,40 +1672,6 @@ spec:
         - mountPath: /opt/kserve/mmesh/etcd
           name: etcd-config
           readOnly: true
-      - env:
-        - name: MODEL_DIRECTORY_PATH
-          value: /models
-        - name: MODEL_SERVER_MEM_REQ_BYTES
-          valueFrom:
-            resourceFieldRef:
-              containerName: modelserver
-              divisor: "0"
-              resource: requests.memory
-        image: seldonio/mlserver:0.3.2
-        imagePullPolicy: IfNotPresent
-        lifecycle:
-          preStop:
-            httpGet:
-              path: /prestop
-              port: 8090
-              scheme: HTTP
-        name: modelserver
-        resources:
-          limits:
-            cpu: "5"
-            memory: 1Gi
-          requests:
-            cpu: 500m
-            memory: 1Gi
-        securityContext:
-          capabilities:
-            drop:
-            - ALL
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /models
-          name: models-dir
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler

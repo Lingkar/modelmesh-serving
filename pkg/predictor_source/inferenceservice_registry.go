@@ -23,14 +23,22 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/kserve/modelmesh-serving/apis/serving/common"
+	"github.com/kserve/kserve/pkg/apis/serving/v1beta1"
+	kserveConstants "github.com/kserve/kserve/pkg/constants"
 	"github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
-	"github.com/kserve/modelmesh-serving/apis/serving/v1beta1"
+	"knative.dev/pkg/apis"
 
-	corev1 "k8s.io/api/core/v1"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	secretKeyAnnotation  = "serving.kserve.io/secretKey"
+	schemaPathAnnotation = "serving.kserve.io/schemaPath"
+	runtimeAnnotation    = "serving.kserve.io/servingRuntime"
+
+	azureBlobHostSuffix = "blob.core.windows.net"
 )
 
 var _ PredictorRegistry = (*InferenceServiceRegistry)(nil)
@@ -39,18 +47,22 @@ type InferenceServiceRegistry struct {
 	Client client.Client
 }
 
+var conditionSet = apis.NewLivingConditionSet(
+	v1beta1.PredictorReady,
+)
+
 func BuildBasePredictorFromInferenceService(isvc *v1beta1.InferenceService) (*v1alpha1.Predictor, error) {
 	p := &v1alpha1.Predictor{}
 
 	// Check if resource should be reconciled.
-	if isvc.ObjectMeta.Annotations[v1beta1.DeploymentModeAnnotation] != v1beta1.MMDeploymentModeVal {
+	if isvc.ObjectMeta.Annotations[kserveConstants.DeploymentMode] != string(kserveConstants.ModelMeshDeployment) {
 		return nil, nil
 	}
 
 	p.ObjectMeta = isvc.ObjectMeta
 
-	framework, frameworkSpec := isvc.Spec.Predictor.GetPredictorFramework()
-	runtimeFromAnnotation, runtimeAnnotationExists := isvc.ObjectMeta.Annotations[v1beta1.RuntimeAnnotation]
+	framework, frameworkSpec := getPredictorFramework(&isvc.Spec.Predictor)
+	runtimeFromAnnotation, runtimeAnnotationExists := isvc.ObjectMeta.Annotations[runtimeAnnotation]
 
 	if isvc.Spec.Predictor.Model != nil {
 
@@ -59,7 +71,7 @@ func BuildBasePredictorFromInferenceService(isvc *v1beta1.InferenceService) (*v1
 		}
 		if runtimeAnnotationExists {
 			return nil, fmt.Errorf("the InferenceService %v cannot have both the model spec and the "+
-				"runtime annotation %v", isvc.Name, v1beta1.RuntimeAnnotation)
+				"runtime annotation %v", isvc.Name, runtimeAnnotation)
 		}
 
 		p.Spec = v1alpha1.PredictorSpec{
@@ -70,6 +82,12 @@ func BuildBasePredictorFromInferenceService(isvc *v1beta1.InferenceService) (*v1
 				},
 			},
 		}
+
+		protocolVersion := isvc.Spec.Predictor.Model.ProtocolVersion
+		if protocolVersion != nil && *protocolVersion != kserveConstants.ProtocolUnknown {
+			p.Spec.ProtocolVersion = protocolVersion
+		}
+
 		if isvc.Spec.Predictor.Model.Runtime != nil {
 			p.Spec.Runtime = &v1alpha1.PredictorRuntime{
 				RuntimeRef: &v1alpha1.RuntimeRef{
@@ -90,6 +108,11 @@ func BuildBasePredictorFromInferenceService(isvc *v1beta1.InferenceService) (*v1
 					Name: framework,
 				},
 			},
+		}
+
+		protocolVersion := frameworkSpec.ProtocolVersion
+		if protocolVersion != nil && *protocolVersion != kserveConstants.ProtocolUnknown {
+			p.Spec.ProtocolVersion = protocolVersion
 		}
 
 		// If explicit ServingRuntime was passed in through an annotation
@@ -113,7 +136,7 @@ func processInferenceServiceStorage(inferenceService *v1beta1.InferenceService, 
 		pSpec = &inferenceService.Spec.Predictor.Model.PredictorExtensionSpec
 
 	} else {
-		_, pSpec = inferenceService.Spec.Predictor.GetPredictorFramework()
+		_, pSpec = getPredictorFramework(&inferenceService.Spec.Predictor)
 	}
 
 	storageUri := pSpec.StorageURI
@@ -148,8 +171,22 @@ func processInferenceServiceStorage(inferenceService *v1beta1.InferenceService, 
 			uriParameters["type"] = "gcs"
 			uriParameters["bucket"] = u.Host
 		case "http", "https":
-			uriParameters["type"] = "http"
-			uriParameters["url"] = *storageUri
+			if strings.HasSuffix(u.Host, azureBlobHostSuffix) {
+				uriParameters["type"] = "azure"
+
+				pathParts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+				if len(pathParts) < 1 {
+					err = fmt.Errorf("the InferenceService %v has an invalid URL path %v", nname, *storageUri)
+					return
+				}
+				hostParts := strings.Split(u.Host, ".")
+				uriParameters["container"] = pathParts[0]
+				uriParameters["account_name"] = hostParts[0]
+				modelPath = strings.Join(pathParts[1:], "/")
+			} else {
+				uriParameters["type"] = "http"
+				uriParameters["url"] = *storageUri
+			}
 		default:
 			err = fmt.Errorf("the InferenceService %v has an unsupported storageUri scheme %v", nname, u.Scheme)
 			return
@@ -182,19 +219,41 @@ func processInferenceServiceStorage(inferenceService *v1beta1.InferenceService, 
 
 	// alternative source for SecretKey for backwards compatibility
 	if secretKey == nil {
-		if sk, ok := inferenceService.ObjectMeta.Annotations[v1beta1.SecretKeyAnnotation]; ok {
+		if sk, ok := inferenceService.ObjectMeta.Annotations[secretKeyAnnotation]; ok {
 			secretKey = &sk
 		}
 	}
 
 	// alternative source for SchemaPath for backwards compatibility
 	if schemaPath == nil {
-		if sp, ok := inferenceService.ObjectMeta.Annotations[v1beta1.SchemaPathAnnotation]; ok {
+		if sp, ok := inferenceService.ObjectMeta.Annotations[schemaPathAnnotation]; ok {
 			schemaPath = &sp
 		}
 	}
 
 	return
+}
+
+func getPredictorFramework(s *v1beta1.PredictorSpec) (string, *v1beta1.PredictorExtensionSpec) {
+	if s.XGBoost != nil {
+		return "xgboost", &s.XGBoost.PredictorExtensionSpec
+	} else if s.LightGBM != nil {
+		return "lightgbm", &s.LightGBM.PredictorExtensionSpec
+	} else if s.SKLearn != nil {
+		return "sklearn", &s.SKLearn.PredictorExtensionSpec
+	} else if s.Tensorflow != nil {
+		return "tensorflow", &s.Tensorflow.PredictorExtensionSpec
+	} else if s.ONNX != nil {
+		return "onnx", &s.ONNX.PredictorExtensionSpec
+	} else if s.PyTorch != nil {
+		return "pytorch", &s.PyTorch.PredictorExtensionSpec
+	} else if s.Triton != nil {
+		return "triton", &s.Triton.PredictorExtensionSpec
+	} else if s.PMML != nil {
+		return "pmml", &s.PMML.PredictorExtensionSpec
+	} else {
+		return "", nil
+	}
 }
 
 func (isvcr InferenceServiceRegistry) Get(ctx context.Context, nname types.NamespacedName) (*v1alpha1.Predictor, error) {
@@ -216,10 +275,37 @@ func (isvcr InferenceServiceRegistry) Get(ctx context.Context, nname types.Names
 		return nil, nil
 	}
 
-	p.Status = inferenceService.Status.PredictorStatus
+	p.Status = v1alpha1.PredictorStatus{}
+	p.Status.TransitionStatus = v1alpha1.TransitionStatus(inferenceService.Status.ModelStatus.TransitionStatus)
+	if inferenceService.Status.ModelStatus.ModelCopies != nil {
+		p.Status.FailedCopies = inferenceService.Status.ModelStatus.ModelCopies.FailedCopies
+		p.Status.TotalCopies = inferenceService.Status.ModelStatus.ModelCopies.TotalCopies
+	}
+	if inferenceService.Status.ModelStatus.ModelRevisionStates != nil {
+		p.Status.ActiveModelState = v1alpha1.ModelState(inferenceService.Status.ModelStatus.ModelRevisionStates.ActiveModelState)
+		p.Status.TargetModelState = v1alpha1.ModelState(inferenceService.Status.ModelStatus.ModelRevisionStates.TargetModelState)
+	}
+	if inferenceService.Status.ModelStatus.LastFailureInfo != nil {
+		p.Status.LastFailureInfo = &v1alpha1.FailureInfo{
+			Location: inferenceService.Status.ModelStatus.LastFailureInfo.Location,
+			Reason:   v1alpha1.FailureReason(inferenceService.Status.ModelStatus.LastFailureInfo.Reason),
+			Message:  inferenceService.Status.ModelStatus.LastFailureInfo.Message,
+			ModelId:  inferenceService.Status.ModelStatus.LastFailureInfo.ModelRevisionName,
+			Time:     inferenceService.Status.ModelStatus.LastFailureInfo.Time,
+		}
+	}
+	p.Status.Available = inferenceService.Status.IsConditionReady(v1beta1.PredictorReady)
+	if componentStatus, ok := inferenceService.Status.Components[v1beta1.PredictorComponent]; ok {
+		if componentStatus.GrpcURL != nil {
+			p.Status.GrpcEndpoint = componentStatus.GrpcURL.String()
+		}
+		if componentStatus.RestURL != nil {
+			p.Status.HTTPEndpoint = componentStatus.RestURL.String()
+		}
+	}
 
 	if p.Status.ActiveModelState == "" {
-		p.Status.ActiveModelState = common.Pending
+		p.Status.ActiveModelState = v1alpha1.Pending
 	}
 
 	secretKey, parameters, modelPath, schemaPath, err := processInferenceServiceStorage(inferenceService, nname)
@@ -258,23 +344,53 @@ func (isvcr InferenceServiceRegistry) UpdateStatus(ctx context.Context, predicto
 	inferenceService := &v1beta1.InferenceService{}
 
 	inferenceService.ObjectMeta = predictor.ObjectMeta
-	inferenceService.Status.PredictorStatus = predictor.Status
+
+	inferenceService.Status.ModelStatus.TransitionStatus = v1beta1.TransitionStatus(predictor.Status.TransitionStatus)
+	inferenceService.Status.ModelStatus.ModelRevisionStates = &v1beta1.ModelRevisionStates{
+		ActiveModelState: v1beta1.ModelState(predictor.Status.ActiveModelState),
+		TargetModelState: v1beta1.ModelState(predictor.Status.TargetModelState),
+	}
+	inferenceService.Status.ModelStatus.ModelCopies = &v1beta1.ModelCopies{
+		FailedCopies: predictor.Status.FailedCopies,
+		TotalCopies:  predictor.Status.TotalCopies,
+	}
+	if predictor.Status.LastFailureInfo != nil {
+		inferenceService.Status.ModelStatus.LastFailureInfo = &v1beta1.FailureInfo{
+			Location:          predictor.Status.LastFailureInfo.Location,
+			Reason:            v1beta1.FailureReason(predictor.Status.LastFailureInfo.Reason),
+			Message:           predictor.Status.LastFailureInfo.Message,
+			ModelRevisionName: predictor.Status.LastFailureInfo.ModelId,
+			Time:              predictor.Status.LastFailureInfo.Time,
+		}
+	}
 
 	if predictor.Status.Available {
-		inferenceService.Status.Conditions = v1beta1.Conditions{
-			v1beta1.Condition{
-				Type:   "Ready",
-				Status: corev1.ConditionTrue,
-			},
+		grpcUrl, err := apis.ParseURL(predictor.Status.GrpcEndpoint)
+		if err != nil {
+			return false, err
 		}
-		inferenceService.Status.URL = predictor.Status.GrpcEndpoint
+		restUrl, err := apis.ParseURL(predictor.Status.HTTPEndpoint)
+		if err != nil {
+			return false, err
+		}
+
+		inferenceService.Status.URL = grpcUrl
+
+		if inferenceService.Status.Components == nil {
+			inferenceService.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
+		}
+		componentStatus, ok := inferenceService.Status.Components[v1beta1.PredictorComponent]
+		if !ok {
+			componentStatus = v1beta1.ComponentStatusSpec{}
+		}
+		componentStatus.URL = grpcUrl
+		componentStatus.GrpcURL = grpcUrl
+		componentStatus.RestURL = restUrl
+		inferenceService.Status.Components[v1beta1.PredictorComponent] = componentStatus
+
+		conditionSet.Manage(&inferenceService.Status).MarkTrue(v1beta1.PredictorReady)
 	} else {
-		inferenceService.Status.Conditions = v1beta1.Conditions{
-			v1beta1.Condition{
-				Type:   "Ready",
-				Status: corev1.ConditionFalse,
-			},
-		}
+		conditionSet.Manage(&inferenceService.Status).MarkFalse(v1beta1.PredictorReady, "", "")
 	}
 	if err := isvcr.Client.Status().Update(ctx, inferenceService); err != nil {
 		if k8serr.IsConflict(err) {

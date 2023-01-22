@@ -14,53 +14,48 @@
 package modelmesh
 
 import (
-	"sort"
+	"fmt"
 
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+	"github.com/kserve/kserve/pkg/constants"
 	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-type StringSet map[string]struct{}
-
-var exists = struct{}{} // empty struct placeholder
-
-func (ss StringSet) Add(s string) {
-	ss[s] = exists
-}
-
-func (ss StringSet) Contains(s string) bool {
-	_, found := ss[s]
-	return found
-}
-
-func (ss StringSet) ToSlice() []string {
-	strs := make([]string, 0, len(ss))
-	for s := range ss {
-		strs = append(strs, s)
-	}
-	// map keys are not ordered, so we sort them
-	sort.Strings(strs)
-	return strs
-}
-
-func GetServingRuntimeSupportedModelTypeLabelSet(rt *api.ServingRuntime) StringSet {
-	set := make(StringSet, 2*len(rt.Spec.SupportedModelFormats)+1)
+func GetServingRuntimeLabelSets(rt *kserveapi.ServingRuntimeSpec, restProxyEnabled bool, rtName string) (
+	mtLabels sets.String, pvLabels sets.String, rtLabel string) {
 
 	// model type labels
-	for _, t := range rt.Spec.SupportedModelFormats {
+	mtSet := make(sets.String, 2*len(rt.SupportedModelFormats))
+	for _, t := range rt.SupportedModelFormats {
 		// only include model type labels when autoSelect is true
 		if t.AutoSelect != nil && *t.AutoSelect {
-			set.Add("mt:" + t.Name)
+			mtSet.Insert(fmt.Sprintf("mt:%s", t.Name))
 			if t.Version != nil {
-				set.Add("mt:" + t.Name + ":" + *t.Version)
+				mtSet.Insert(fmt.Sprintf("mt:%s:%s", t.Name, *t.Version))
 			}
 		}
 	}
+	// protocol versions
+	pvSet := make(sets.String, len(rt.ProtocolVersions))
+	for _, pv := range rt.ProtocolVersions {
+		pvSet.Insert(fmt.Sprintf("pv:%s", pv))
+		if restProxyEnabled && pv == constants.ProtocolGRPCV2 {
+			pvSet.Insert(fmt.Sprintf("pv:%s", constants.ProtocolV2))
+		}
+	}
 	// runtime label
-	set.Add("rt:" + rt.Name)
-	return set
+	return mtSet, pvSet, fmt.Sprintf("rt:%s", rtName)
 }
 
-func GetPredictorModelTypeLabel(p *api.Predictor) string {
+func GetServingRuntimeLabelSet(rt *kserveapi.ServingRuntimeSpec, restProxyEnabled bool, rtName string) sets.String {
+	s1, s2, l := GetServingRuntimeLabelSets(rt, restProxyEnabled, rtName)
+	s1 = s1.Union(s2)
+	s1.Insert(l)
+	return s1
+}
+
+func GetPredictorTypeLabel(p *api.Predictor) string {
 	runtime := p.Spec.Runtime
 	if runtime != nil && runtime.Name != "" {
 		// constrain placement to specific runtime
@@ -68,8 +63,12 @@ func GetPredictorModelTypeLabel(p *api.Predictor) string {
 	}
 	// constrain placement based on model type
 	mt := p.Spec.Model.Type
+	label := "mt:" + mt.Name
 	if mt.Version != nil {
-		return "mt:" + mt.Name + ":" + *mt.Version
+		label = fmt.Sprintf("%s:%s", label, *mt.Version)
 	}
-	return "mt:" + mt.Name
+	if pv := p.Spec.ProtocolVersion; pv != nil {
+		label = fmt.Sprintf("%s|pv:%s", label, *pv)
+	}
+	return label
 }

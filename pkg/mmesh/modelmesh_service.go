@@ -20,6 +20,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/go-logr/logr"
 	"github.com/kserve/modelmesh-serving/pkg/config"
 	"go.uber.org/atomic"
@@ -100,7 +102,6 @@ func (mms *MMService) UpdateConfig(cp *config.ConfigProvider) (*config.Config, b
 	if restPort != mms.restPort {
 		mms.restPort = restPort
 		specChange = true
-		clientChange = true
 	}
 	endpoint := cfg.ModelMeshEndpoint
 	if endpoint == "" {
@@ -255,7 +256,7 @@ func newMmClient(ctx context.Context, mmeshEndpoint string, tlsConfig *tls.Confi
 	dialOpts := make([]grpc.DialOption, 1, 3)
 	dialOpts[0] = grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`)
 	if tlsConfig == nil {
-		dialOpts = append(dialOpts, grpc.WithInsecure())
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else {
 		tc := credentials.NewTLS(tlsConfig)
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(tc), grpc.WithAuthority(serviceName))

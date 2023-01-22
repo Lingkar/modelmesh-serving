@@ -16,15 +16,17 @@ package modelmesh
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
-	"k8s.io/apimachinery/pkg/types"
-
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+	"github.com/kserve/modelmesh-serving/pkg/config"
 )
 
 const defaultTypeConstraint = "_default"
@@ -36,6 +38,18 @@ var dataPlaneApiJsonConfigBytes = []byte(`{
         "inference.GRPCInferenceService/ModelInfer": {
             "idExtractionPath": [1],
             "vModelId": true
+        },
+        "inference.GRPCInferenceService/ModelMetadata": {
+            "idExtractionPath": [1],
+            "vModelId": true
+        },
+        "tensorflow.serving.PredictionService/Predict": {
+            "idExtractionPath": [1, 1],
+            "vModelId": true
+        },
+        "org.pytorch.serve.grpc.inference.InferenceAPIsService/Predictions": {
+            "idExtractionPath": [1],
+            "vModelId": true
         }
     },
     "allowOtherRpcs": true
@@ -44,18 +58,19 @@ var dataPlaneApiJsonConfigBytes = []byte(`{
 // A ClusterConfig represents the configuration shared across
 // a logical model mesh cluster
 type ClusterConfig struct {
-	Runtimes *api.ServingRuntimeList
-	Scheme   *runtime.Scheme
+	SRSpecs map[string]*kserveapi.ServingRuntimeSpec
+	Scheme  *runtime.Scheme
 }
 
-func (cc ClusterConfig) Reconcile(ctx context.Context, namespace string, cl client.Client) error {
+func (cc ClusterConfig) Reconcile(ctx context.Context, namespace string, cl client.Client, cfg *config.Config) error {
 	m := &corev1.ConfigMap{}
 	err := cl.Get(ctx, types.NamespacedName{Name: InternalConfigMapName, Namespace: namespace}, m)
 	notfound := errors.IsNotFound(err)
 	if err != nil && !notfound {
 		return err
 	}
-	if cc.Runtimes == nil || len(cc.Runtimes.Items) == 0 {
+
+	if cc.SRSpecs == nil || len(cc.SRSpecs) == 0 {
 		if !notfound {
 			return cl.Delete(ctx, m)
 		}
@@ -72,7 +87,7 @@ func (cc ClusterConfig) Reconcile(ctx context.Context, namespace string, cl clie
 			"app.kubernetes.io/name":       commonLabelValue,
 		},
 	}
-	cc.addConstraints(cc.Runtimes, m)
+	cc.addConstraints(cc.SRSpecs, m, cfg.RESTProxy.Enabled)
 
 	if notfound {
 		return cl.Create(ctx, m)
@@ -82,8 +97,8 @@ func (cc ClusterConfig) Reconcile(ctx context.Context, namespace string, cl clie
 }
 
 // Add constraint data to the provided config map
-func (cc ClusterConfig) addConstraints(rts *api.ServingRuntimeList, m *corev1.ConfigMap) {
-	b := calculateConstraintData(rts.Items)
+func (cc ClusterConfig) addConstraints(srSpecs map[string]*kserveapi.ServingRuntimeSpec, m *corev1.ConfigMap, restProxyEnabled bool) {
+	b := calculateConstraintData(srSpecs, restProxyEnabled)
 	if m.BinaryData == nil {
 		m.BinaryData = make(map[string][]byte)
 	}
@@ -91,7 +106,8 @@ func (cc ClusterConfig) addConstraints(rts *api.ServingRuntimeList, m *corev1.Co
 	m.BinaryData[MMDataPlaneConfigKey] = dataPlaneApiJsonConfigBytes
 }
 
-func calculateConstraintData(rts []api.ServingRuntime) []byte {
+func calculateConstraintData(srSpecs map[string]*kserveapi.ServingRuntimeSpec, restProxyEnabled bool) []byte {
+
 	/*b := []byte(`{
 	  "rt:tf-serving-runtime": {
 	    "required": ["rt:tf-serving-runtime"]
@@ -108,12 +124,16 @@ func calculateConstraintData(rts []api.ServingRuntime) []byte {
 	}`)*/
 
 	m := make(map[string]interface{})
-	for _, rt := range rts {
-		if !rt.Disabled() && rt.IsMultiModelRuntime() {
-			labels := GetServingRuntimeSupportedModelTypeLabelSet(&rt)
-			// treat each label as a separate model type
-			for l := range labels {
+	for name, spec := range srSpecs {
+		if !spec.IsDisabled() && spec.IsMultiModelRuntime() {
+			mtLabels, pvLabels, rtLabel := GetServingRuntimeLabelSets(spec, restProxyEnabled, name)
+			m[rtLabel] = map[string]interface{}{"required": []string{rtLabel}}
+			// treat each combo of model-type label and proto version label as a separate model type
+			for l := range mtLabels {
 				m[l] = map[string]interface{}{"required": []string{l}}
+				for pvl := range pvLabels {
+					m[fmt.Sprintf("%s|%s", l, pvl)] = map[string]interface{}{"required": []string{l, pvl}}
+				}
 			}
 		}
 	}

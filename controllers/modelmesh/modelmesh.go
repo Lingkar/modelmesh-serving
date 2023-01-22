@@ -19,7 +19,7 @@ import (
 	"strconv"
 
 	"github.com/go-logr/logr"
-	api "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
+	kserveapi "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	"github.com/kserve/modelmesh-serving/controllers/config"
 	mf "github.com/manifestival/manifestival"
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,13 +34,14 @@ const logYaml = false
 
 const ModelMeshEtcdPrefix = "mm"
 
-//Models a deployment
+// Models a deployment
 type Deployment struct {
 	ServiceName        string
 	ServicePort        uint16
 	Name               string
 	Namespace          string
-	Owner              *api.ServingRuntime
+	Owner              mf.Owner
+	SRSpec             *kserveapi.ServingRuntimeSpec
 	DefaultVModelOwner string
 	Log                logr.Logger
 	Metrics            bool
@@ -70,6 +71,9 @@ type Deployment struct {
 	ServiceAccountName  string
 	GrpcMaxMessageSize  int
 	AnnotationConfigMap *corev1.ConfigMap
+	AnnotationsMap      map[string]string
+	LabelsMap           map[string]string
+	ImagePullSecrets    []corev1.LocalObjectReference
 	EnableAccessLogging bool
 	Client              client.Client
 }
@@ -111,7 +115,6 @@ func (m *Deployment) Apply(ctx context.Context) error {
 
 			if tErr := m.transform(deployment,
 				m.addVolumesToDeployment,
-				m.addStorageConfigVolume,
 				m.addMMDomainSocketMount,
 				m.addPassThroughPodFieldsToDeployment,
 				m.addRuntimeToDeployment,
@@ -121,6 +124,10 @@ func (m *Deployment) Apply(ctx context.Context) error {
 				m.configureMMDeploymentForEtcdSecret,
 				m.addRESTProxyToDeployment,
 				m.configureMMDeploymentForTLSSecret,
+				m.configureRuntimePodSpecAnnotations,
+				m.configureRuntimePodSpecLabels,
+				m.ensureMMContainerIsLast,
+				m.configureRuntimePodSpecImagePullSecrets,
 			); tErr != nil {
 				return tErr
 			}
@@ -132,9 +139,9 @@ func (m *Deployment) Apply(ctx context.Context) error {
 		return fmt.Errorf("Error transforming: %w", err)
 	}
 
-	if useStorageHelper(m.Owner) {
+	if useStorageHelper(m.SRSpec) {
 		manifest, err = manifest.Transform(
-			addPullerTransform(m.Owner, m.PullerImage, m.PullerImageCommand, m.PullerResources),
+			addPullerTransform(m.SRSpec, m.PullerImage, m.PullerImageCommand, m.PullerResources),
 		)
 		if err != nil {
 			return fmt.Errorf("Error transforming: %w", err)
@@ -153,9 +160,27 @@ func (m *Deployment) Apply(ctx context.Context) error {
 	return nil
 }
 
+// Kubernetes starts containers sequentially in order, which can mean the start of later
+// containers is held up if their images have to be pulled. For large model server images
+// this can cause a problem because model-mesh waits for a limited amount of time at
+// startup for the runtime to become ready before returning ready from its own probe.
+// Making the mm container last in the list ensures that no image pulling time will be
+// included in this startup polling time and avoids unnecessary timeouts.
+func (m *Deployment) ensureMMContainerIsLast(deployment *appsv1.Deployment) error {
+	if i, _ := findContainer(ModelMeshContainerName, deployment); i >= 0 {
+		last := len(deployment.Spec.Template.Spec.Containers) - 1
+		if i != last {
+			c := deployment.Spec.Template.Spec.Containers[last]
+			deployment.Spec.Template.Spec.Containers[last] = deployment.Spec.Template.Spec.Containers[i]
+			deployment.Spec.Template.Spec.Containers[i] = c
+		}
+	}
+	return nil
+}
+
 func (m *Deployment) Delete(ctx context.Context, client client.Client) error {
-	m.Log.Info("Deleting model mesh deployment ", "m", m)
-	return config.Delete(client, m.Owner, "config/internal/base/deployment.yaml.tmpl", m)
+	m.Log.Info("Deleting modelmesh deployment ", "name", m.Name, "namespace", m.Namespace)
+	return config.Delete(client, m.Owner, "config/internal/base/deployment.yaml.tmpl", m, m.Namespace)
 }
 
 func (m *Deployment) transform(deployment *appsv1.Deployment, funcs ...func(deployment *appsv1.Deployment) error) error {
@@ -170,11 +195,11 @@ func (m *Deployment) transform(deployment *appsv1.Deployment, funcs ...func(depl
 
 func (m *Deployment) addMMDomainSocketMount(deployment *appsv1.Deployment) error {
 	var c *corev1.Container
-	if _, c = findContainer(ModelMeshContainer, deployment); c == nil {
-		return fmt.Errorf("Could not find the model mesh container %v", ModelMeshContainer)
+	if _, c = findContainer(ModelMeshContainerName, deployment); c == nil {
+		return fmt.Errorf("Could not find the model mesh container %v", ModelMeshContainerName)
 	}
 
-	if hasUnix, mountPoint, err := mountPoint(m.Owner); err != nil {
+	if hasUnix, mountPoint, err := mountPoint(m.SRSpec); err != nil {
 		return err
 	} else if hasUnix {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
@@ -190,43 +215,43 @@ func (m *Deployment) addMMEnvVars(deployment *appsv1.Deployment) error {
 	// start with the "additional" env vars so that they are overwritten by
 	// the values set below
 	for _, envvar := range m.ModelMeshAdditionalEnvVars {
-		if err := setEnvironmentVar(ModelMeshContainer, envvar.Name, envvar.Value, deployment); err != nil {
+		if err := setEnvironmentVar(ModelMeshContainerName, envvar.Name, envvar.Value, deployment); err != nil {
 			return err
 		}
 	}
 
-	rt := m.Owner
-	if rt.Spec.GrpcDataEndpoint != nil {
-		e, err := ParseEndpoint(*rt.Spec.GrpcDataEndpoint)
+	rts := m.SRSpec
+	if rts.GrpcDataEndpoint != nil {
+		e, err := ParseEndpoint(*rts.GrpcDataEndpoint)
 		if err != nil {
 			return err
 		}
 		if tcpE, ok := e.(TCPEndpoint); ok {
-			if err = setEnvironmentVar(ModelMeshContainer, ServeGrpcPortEnvVar, tcpE.Port, deployment); err != nil {
+			if err = setEnvironmentVar(ModelMeshContainerName, ServeGrpcPortEnvVar, tcpE.Port, deployment); err != nil {
 				return err
 			}
 		} else if udsE, ok := e.(UnixEndpoint); ok {
-			if err = setEnvironmentVar(ModelMeshContainer, ServeGrpcUdsPathEnvVar, udsE.Path, deployment); err != nil {
+			if err = setEnvironmentVar(ModelMeshContainerName, ServeGrpcUdsPathEnvVar, udsE.Path, deployment); err != nil {
 				return err
 			}
 		}
 	}
 
-	if useStorageHelper(rt) {
-		if err := setEnvironmentVar(ModelMeshContainer, GrpcPortEnvVar, strconv.Itoa(PullerPortNumber), deployment); err != nil {
+	if useStorageHelper(rts) {
+		if err := setEnvironmentVar(ModelMeshContainerName, GrpcPortEnvVar, strconv.Itoa(PullerPortNumber), deployment); err != nil {
 			return err
 		}
 	} else {
-		e, err := ParseEndpoint(*rt.Spec.GrpcMultiModelManagementEndpoint)
+		e, err := ParseEndpoint(*rts.GrpcMultiModelManagementEndpoint)
 		if err != nil {
 			return err
 		}
 		if tcpE, ok := e.(TCPEndpoint); ok {
-			if err = setEnvironmentVar(ModelMeshContainer, GrpcPortEnvVar, tcpE.Port, deployment); err != nil {
+			if err = setEnvironmentVar(ModelMeshContainerName, GrpcPortEnvVar, tcpE.Port, deployment); err != nil {
 				return err
 			}
 		} else if udsE, ok := e.(UnixEndpoint); ok {
-			if err = setEnvironmentVar(ModelMeshContainer, GrpcUdsPathEnvVar, udsE.Path, deployment); err != nil {
+			if err = setEnvironmentVar(ModelMeshContainerName, GrpcUdsPathEnvVar, udsE.Path, deployment); err != nil {
 				return err
 			}
 		}
@@ -234,24 +259,24 @@ func (m *Deployment) addMMEnvVars(deployment *appsv1.Deployment) error {
 
 	if m.EnableAccessLogging {
 		//See https://github.com/kserve/modelmesh/blob/main/src/main/java/com/ibm/watson/modelmesh/ModelMeshEnvVars.java#L52
-		if err := setEnvironmentVar(ModelMeshContainer, "MM_LOG_EACH_INVOKE", "true", deployment); err != nil {
+		if err := setEnvironmentVar(ModelMeshContainerName, "MM_LOG_EACH_INVOKE", "true", deployment); err != nil {
 			return err
 		}
 	}
 
 	if m.GrpcMaxMessageSize > 0 {
 		//See https://github.com/kserve/modelmesh/blob/main/src/main/java/com/ibm/watson/modelmesh/ModelMeshEnvVars.java#L38
-		if err := setEnvironmentVar(ModelMeshContainer, "MM_SVC_GRPC_MAX_MSG_SIZE", strconv.Itoa(m.GrpcMaxMessageSize), deployment); err != nil {
+		if err := setEnvironmentVar(ModelMeshContainerName, "MM_SVC_GRPC_MAX_MSG_SIZE", strconv.Itoa(m.GrpcMaxMessageSize), deployment); err != nil {
 			return err
 		}
 	}
 
 	// See https://github.com/kserve/modelmesh/blob/main/src/main/java/com/ibm/watson/modelmesh/ModelMeshEnvVars.java#L31
-	if err := setEnvironmentVar(ModelMeshContainer, "MM_KVSTORE_PREFIX", ModelMeshEtcdPrefix, deployment); err != nil {
+	if err := setEnvironmentVar(ModelMeshContainerName, "MM_KVSTORE_PREFIX", ModelMeshEtcdPrefix, deployment); err != nil {
 		return err
 	}
 	// See https://github.com/kserve/modelmesh/blob/main/src/main/java/com/ibm/watson/modelmesh/ModelMeshEnvVars.java#L65
-	if err := setEnvironmentVar(ModelMeshContainer, "MM_DEFAULT_VMODEL_OWNER", m.DefaultVModelOwner, deployment); err != nil {
+	if err := setEnvironmentVar(ModelMeshContainerName, "MM_DEFAULT_VMODEL_OWNER", m.DefaultVModelOwner, deployment); err != nil {
 		return err
 	}
 
@@ -259,9 +284,7 @@ func (m *Deployment) addMMEnvVars(deployment *appsv1.Deployment) error {
 }
 
 func (m *Deployment) setConfigMap() error {
-	// get configmap name from servingRuntime
-	rt := m.Owner
-	configMap := rt.ObjectMeta.Annotations["productConfig"]
+	configMap := m.Owner.GetAnnotations()["productConfig"]
 	if configMap == "" {
 		return nil
 	}

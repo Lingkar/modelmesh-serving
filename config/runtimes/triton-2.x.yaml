@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 apiVersion: serving.kserve.io/v1alpha1
-kind: ServingRuntime
+kind: ClusterServingRuntime
 metadata:
   name: triton-2.x
   labels:
@@ -40,6 +40,8 @@ spec:
       version: "7" # 7.2.1
       autoSelect: true
 
+  protocolVersions:
+    - grpc-v2
   multiModel: true
 
   grpcEndpoint: "port:8085"
@@ -87,7 +89,7 @@ spec:
         periodSeconds: 30
         timeoutSeconds: 10
   builtInAdapter:
-    serverType: "triton"
+    serverType: triton
     runtimeManagementPort: 8001
     memBufferBytes: 134217728
     modelLoadingTimeoutMillis: 90000

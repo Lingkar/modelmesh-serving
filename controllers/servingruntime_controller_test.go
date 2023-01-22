@@ -21,7 +21,7 @@ import (
 
 	mfc "github.com/manifestival/controller-runtime-client"
 	mf "github.com/manifestival/manifestival"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -55,6 +55,8 @@ var _ = Describe("Sample Runtime", func() {
 	samplesToTest := []string{
 		"config/runtimes/mlserver-0.x.yaml",
 		"config/runtimes/triton-2.x.yaml",
+		"config/runtimes/ovms-1.x.yaml",
+		"config/runtimes/torchserve-0.x.yaml",
 	}
 	for _, f := range samplesToTest {
 		// capture the value in new variable for each iteration
@@ -68,7 +70,7 @@ var _ = Describe("Sample Runtime", func() {
 				m, err = mf.ManifestFrom(mf.Path(filepath.Join("..", sampleFilename)))
 				m.Client = mfc.NewClient(k8sClient)
 				Expect(err).ToNot(HaveOccurred())
-				m, err = m.Transform(mf.InjectNamespace(namespace))
+				m, err = m.Transform(convertToServingRuntime, mf.InjectNamespace(namespace))
 				Expect(err).ToNot(HaveOccurred())
 				err = m.Apply()
 				Expect(err).ToNot(HaveOccurred())
@@ -99,7 +101,7 @@ var _ = Describe("Prometheus metrics configuration", func() {
 		m, err = mf.ManifestFrom(mf.Path("../config/runtimes/mlserver-0.x.yaml"))
 		m.Client = mfc.NewClient(k8sClient)
 		Expect(err).ToNot(HaveOccurred())
-		m, err = m.Transform(mf.InjectNamespace(namespace))
+		m, err = m.Transform(convertToServingRuntime, mf.InjectNamespace(namespace))
 		Expect(err).ToNot(HaveOccurred())
 		err = m.Apply()
 		Expect(err).ToNot(HaveOccurred())
@@ -170,7 +172,7 @@ var _ = Describe("REST Proxy configuration", func() {
 	var m mf.Manifest
 	var err error
 
-	It("deployment should contain REST Proxy container", func() {
+	It("deployment should contain REST Proxy container and extra v2 protocol label", func() {
 		By("enable REST Proxy in the config")
 		reconcilerConfig.RESTProxy.Enabled = true
 
@@ -178,7 +180,7 @@ var _ = Describe("REST Proxy configuration", func() {
 		m, err = mf.ManifestFrom(mf.Path("../config/runtimes/mlserver-0.x.yaml"))
 		m.Client = mfc.NewClient(k8sClient)
 		Expect(err).ToNot(HaveOccurred())
-		m, err = m.Transform(mf.InjectNamespace(namespace))
+		m, err = m.Transform(convertToServingRuntime, mf.InjectNamespace(namespace))
 		Expect(err).ToNot(HaveOccurred())
 		err = m.Apply()
 		Expect(err).ToNot(HaveOccurred())
@@ -192,3 +194,10 @@ var _ = Describe("REST Proxy configuration", func() {
 		Expect(d).To(SnapshotMatcher())
 	})
 })
+
+func convertToServingRuntime(resource *unstructured.Unstructured) error {
+	if resource.GetKind() == "ClusterServingRuntime" {
+		resource.SetKind("ServingRuntime")
+	}
+	return nil
+}

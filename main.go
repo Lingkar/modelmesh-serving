@@ -24,11 +24,11 @@ import (
 	"regexp"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-
+	"github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
+	"github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	config2 "github.com/kserve/modelmesh-serving/pkg/config"
-
 	"github.com/kserve/modelmesh-serving/pkg/predictor_source"
+	corev1 "k8s.io/api/core/v1"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -52,7 +52,6 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	servingv1alpha1 "github.com/kserve/modelmesh-serving/apis/serving/v1alpha1"
-	servingv1beta1 "github.com/kserve/modelmesh-serving/apis/serving/v1beta1"
 	"github.com/kserve/modelmesh-serving/controllers"
 	"github.com/kserve/modelmesh-serving/controllers/modelmesh"
 	"github.com/kserve/modelmesh-serving/pkg/mmesh"
@@ -66,19 +65,21 @@ var (
 )
 
 const (
-	ControllerNamespaceEnvVar      = "NAMESPACE"
-	DefaultControllerNamespace     = "model-serving"
-	KubeNamespaceFile              = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-	ControllerPodNameEnvVar        = "POD_NAME"
-	ControllerDeploymentNameEnvVar = "CONTROLLER_DEPLOYMENT"
-	DefaultControllerName          = "modelmesh-controller"
-	UserConfigMapName              = "model-serving-config"
-	DevModeLoggingEnvVar           = "DEV_MODE_LOGGING"
-	serviceMonitorCRDName          = "servicemonitors.monitoring.coreos.com"
-	LeaderLockName                 = "modelmesh-controller-leader-lock"
-	LeaderForLifeLockName          = "modelmesh-controller-leader-for-life-lock"
-	EnableInferenceServiceEnvVar   = "ENABLE_ISVC_WATCH"
-	NamespaceScopeEnvVar           = "NAMESPACE_SCOPE"
+	ControllerNamespaceEnvVar         = "NAMESPACE"
+	DefaultControllerNamespace        = "model-serving"
+	KubeNamespaceFile                 = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	ControllerPodNameEnvVar           = "POD_NAME"
+	ControllerDeploymentNameEnvVar    = "CONTROLLER_DEPLOYMENT"
+	DefaultControllerName             = "modelmesh-controller"
+	UserConfigMapName                 = "model-serving-config"
+	DevModeLoggingEnvVar              = "DEV_MODE_LOGGING"
+	serviceMonitorCRDName             = "servicemonitors.monitoring.coreos.com"
+	LeaderLockName                    = "modelmesh-controller-leader-lock"
+	LeaderForLifeLockName             = "modelmesh-controller-leader-for-life-lock"
+	EnableInferenceServiceEnvVar      = "ENABLE_ISVC_WATCH"
+	EnableClusterServingRuntimeEnvVar = "ENABLE_CSR_WATCH"
+	NamespaceScopeEnvVar              = "NAMESPACE_SCOPE"
+	TrueString                        = "true"
 )
 
 func init() {
@@ -90,7 +91,8 @@ func init() {
 	}
 	_ = batchv1.AddToScheme(scheme)
 	_ = servingv1alpha1.AddToScheme(scheme)
-	_ = servingv1beta1.AddToScheme(scheme)
+	_ = v1beta1.AddToScheme(scheme)
+	_ = v1alpha1.AddToScheme(scheme)
 	_ = monitoringv1.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
@@ -120,12 +122,12 @@ func main() {
 		if podName != "" {
 			if matches := regexp.MustCompile("(.*)-.*-.*").FindStringSubmatch(podName); len(matches) == 2 {
 				deployment := matches[1]
-				setupLog.Info("Use controller deployment from POD_NAME", "Deployment", deployment)
+				setupLog.Info("Using controller deployment name from POD_NAME", "Deployment", deployment)
 				controllerDeploymentName = deployment
 			}
 		}
 		if controllerDeploymentName == "" {
-			setupLog.Info("Skip empty Controller deployment from Env Var, use default",
+			setupLog.Info("Controller deployment name env var not provided, using default",
 				"name", DefaultControllerName)
 			controllerDeploymentName = DefaultControllerName
 		}
@@ -173,7 +175,6 @@ func main() {
 	var leaseDuration time.Duration
 	var leaseRenewDeadline time.Duration
 	var leaseRetryPeriod time.Duration
-	var clusterScopeMode bool
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", false,
@@ -189,41 +190,40 @@ func main() {
 		"Duration the Leader elector clients should wait between tries of actions.")
 	flag.Parse()
 
-	mgrNamespace := ""
-	trueString := "true"
-
 	// Controller can be in namespace or cluster scope mode depending on an env variable
-	clusterScopeMode = os.Getenv(NamespaceScopeEnvVar) != trueString
+	clusterScopeMode := os.Getenv(NamespaceScopeEnvVar) != TrueString
 
 	// Here we check whether RBAC is set for cluster scope
 	err = cl.Get(context.Background(), client.ObjectKey{Name: "foo"}, &corev1.Namespace{})
+	hasClusterPermissions := err == nil || errors.IsNotFound(err)
 
-	if err == nil || errors.IsNotFound(err) {
-		// Controller has cluster permissions
-		if clusterScopeMode {
-			setupLog.Info("Controller operating in cluster scope mode, will attempt to watch all namespaces")
-		} else {
-			// Config mismatch, namespace mode with cluster permissions, will continue with a log
-			setupLog.Info("In namespace scope mode but controller has cluster scope permissions, continue")
-		}
-	} else {
-		// Controller has namespace permissions
-		if clusterScopeMode {
+	if clusterScopeMode {
+		if !hasClusterPermissions {
 			// Config mismatch, cluster mode without cluster permissions, exit
-			setupLog.Error(fmt.Errorf("Insufficient permission for controller"), "In cluster scope mode but controller has namespace scope permissions, exit")
+			setupLog.Error(nil, "In cluster scope mode but controller does not have cluster scope permissions, exiting")
 			os.Exit(1)
-		} else {
-			mgrNamespace = ControllerNamespace
-			setupLog.Info("Controller operating in own-namespace only mode")
+		}
+		setupLog.Info("Controller operating in cluster scope mode, will attempt to watch/manage all namespaces")
+	} else {
+		// Namespace-scope mode configured
+		setupLog.Info("Controller operating in namespace scope (own-namespace only) mode",
+			"namespace", ControllerNamespace)
+
+		if hasClusterPermissions {
+			setupLog.Error(nil, "Warning: In namespace scope mode but controller has permission to access cluster namespace resources")
 		}
 	}
 
 	mgrOpts := ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     metricsAddr,
-		Namespace:              mgrNamespace,
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
+	}
+
+	if !clusterScopeMode {
+		// Set manager to operate scoped to our namespace
+		mgrOpts.Namespace = ControllerNamespace
 	}
 
 	if enableLeaderElection {
@@ -289,7 +289,7 @@ func main() {
 		Log:                     ctrl.Log.WithName("controllers").WithName("Service"),
 		Scheme:                  mgr.GetScheme(),
 		ControllerDeployment:    types.NamespacedName{Namespace: ControllerNamespace, Name: controllerDeploymentName},
-		NamespaceOwned:          clusterScopeMode,
+		ClusterScope:            clusterScopeMode,
 		MMServices:              mmServiceMap,
 		ModelEventStream:        modelEventStream,
 		ConfigProvider:          cp,
@@ -319,7 +319,7 @@ func main() {
 				registryMap[registryKey] = registryValue
 				setupLog.Info(fmt.Sprintf("Reconciliation of %s is enabled", resourceName))
 				return true
-			} else if envVarVal == trueString {
+			} else if envVarVal == TrueString {
 				// If env var is explicitly true, require that specified CRD is present
 				setupLog.Error(err, fmt.Sprintf("Unable to access %s Custom Resource", resourceName))
 				os.Exit(1)
@@ -332,8 +332,30 @@ func main() {
 		return false
 	}
 
-	enableIsvcWatch := checkEnvVar(EnableInferenceServiceEnvVar, "InferenceService", &servingv1beta1.InferenceService{},
+	enableIsvcWatch := checkEnvVar(EnableInferenceServiceEnvVar, "InferenceService", &v1beta1.InferenceService{},
 		controllers.InferenceServiceCRSourceId, predictor_source.InferenceServiceRegistry{Client: mgr.GetClient()})
+
+	checkCSRVar := func(envVar string, resourceName string, resourceObject client.Object) bool {
+
+		envVarVal, _ := os.LookupEnv(envVar)
+		if envVarVal != "false" {
+			err = cl.Get(context.Background(), client.ObjectKey{Name: "foo", Namespace: ControllerNamespace}, resourceObject)
+			if err == nil || errors.IsNotFound(err) {
+				setupLog.Info(fmt.Sprintf("Reconciliation of %s is enabled", resourceName))
+				return true
+			} else if envVarVal == TrueString {
+				// If env var is explicitly true, require that specified CRD is present
+				setupLog.Error(err, fmt.Sprintf("Unable to access %s Custom Resource", resourceName))
+				os.Exit(1)
+			} else if meta.IsNoMatchError(err) {
+				setupLog.Info(fmt.Sprintf("%s CRD not found, will not reconcile", resourceName))
+			} else {
+				setupLog.Error(err, fmt.Sprintf("%s CRD not accessible, will not reconcile", resourceName))
+			}
+		}
+		return false
+	}
+	enableCSRWatch := checkCSRVar(EnableClusterServingRuntimeEnvVar, "ClusterServingRuntime", &v1alpha1.ClusterServingRuntime{})
 
 	var predictorControllerEvents, runtimeControllerEvents chan event.GenericEvent
 	if len(sources) != 0 {
@@ -396,7 +418,8 @@ func main() {
 		ConfigMapName:       types.NamespacedName{Namespace: ControllerNamespace, Name: UserConfigMapName},
 		ControllerNamespace: ControllerNamespace,
 		ControllerName:      controllerDeploymentName,
-		HasNamespaceAccess:  clusterScopeMode,
+		ClusterScope:        clusterScopeMode,
+		EnableCSRWatch:      enableCSRWatch,
 		RegistryMap:         registryMap,
 	}).SetupWithManager(mgr, enableIsvcWatch, runtimeControllerEvents); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ServingRuntime")

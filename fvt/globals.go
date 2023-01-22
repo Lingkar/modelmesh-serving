@@ -13,20 +13,62 @@
 // limitations under the License.
 package fvt
 
-import "github.com/go-logr/logr"
+import (
+	"github.com/go-logr/logr"
+)
 
-var log logr.Logger
-var fvtClient *FVTClient
+var Log logr.Logger
+var FVTClientInstance *FVTClient
+
+var DefaultTimeout = int64(120)
+var NameSpaceScopeMode = false
+
+var DefaultConfig = map[string]interface{}{
+	"podsPerRuntime": 1,
+	"restProxy": map[string]interface{}{
+		"enabled": true,
+	},
+	"scaleToZero": map[string]interface{}{
+		"enabled": false,
+	},
+	"internalModelMeshEnvVars": []map[string]interface{}{
+		{
+			"name":  "BOOTSTRAP_CLEARANCE_PERIOD_MS",
+			"value": "0",
+		},
+	},
+}
+
+var BasicTLSConfig = map[string]interface{}{
+	"tls": map[string]interface{}{
+		"secretName": TLSSecretName,
+		"clientAuth": "optional",
+		// Avoid port-forwarding DNS complications
+		"headlessService": false,
+	},
+}
+
+var MutualTLSConfig = map[string]interface{}{
+	"tls": map[string]interface{}{
+		"secretName": TLSSecretName,
+		"clientAuth": "require",
+		// Avoid port-forwarding DNS complications
+		"headlessService": false,
+	},
+}
 
 const (
 	ServingRuntimeKind         = "ServingRuntime"
 	PredictorKind              = "Predictor"
+	IsvcKind                   = "InferenceService"
 	ConfigMapKind              = "ConfigMap"
 	SecretKind                 = "Secret"
 	DefaultTestNamespace       = "modelmesh-serving"
 	DefaultTestServiceName     = "modelmesh-serving"
 	DefaultControllerNamespace = "modelmesh-serving"
-	userConfigMapName          = "model-serving-config"
-	samplesPath                = "testdata/predictors/"
-	runtimeSamplesPath         = "testdata/runtimes/"
+	UserConfigMapName          = "model-serving-config"
+	SamplesPath                = "predictors/"
+	IsvcSamplesPath            = "isvcs/"
+	RuntimeSamplesPath         = "runtimes/"
+	TLSSecretName              = "fvt-tls-secret"
 )
