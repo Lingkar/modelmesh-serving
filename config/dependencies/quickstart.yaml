@@ -63,42 +63,6 @@ metadata:
   name: model-serving-etcd
 ---
 apiVersion: v1
-kind: Service
-metadata:
-  name: minio
-spec:
-  ports:
-    - name: minio-client-port
-      port: 9000
-      protocol: TCP
-      targetPort: 9000
-  selector:
-    app: minio
----
-apiVersion: v1
-kind: Pod
-metadata:
-  labels:
-    app: minio
-  name: minio
-spec:
-  nodeSelector:
-    kubernetes.io/arch: amd64
-  containers:
-    - args:
-        - server
-        # - /data
-        - /data1
-      env:
-        - name: MINIO_ACCESS_KEY
-          value: AKIAIOSFODNN7EXAMPLE
-        - name: MINIO_SECRET_KEY
-          value: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-      # image: quay.io/cloudservices/minio:latest
-      image: kserve/modelmesh-minio-examples:v0.8.0
-      name: minio
----
-apiVersion: v1
 kind: Secret
 metadata:
   name: storage-config
@@ -106,9 +70,9 @@ stringData:
   localMinIO: |
     {
       "type": "s3",
-      "access_key_id": "AKIAIOSFODNN7EXAMPLE",
-      "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-      "endpoint_url": "http://minio:9000",
-      "default_bucket": "modelmesh-example-models",
-      "region": "us-south"
+      "access_key_id": "LINGKAR",
+      "secret_access_key": "V&2qzsNFwiHhVR",
+      "endpoint_url": "http://192.168.178.24:9000",
+      "default_bucket": "modelmesh-models",
+      "region": "kolk"
     }

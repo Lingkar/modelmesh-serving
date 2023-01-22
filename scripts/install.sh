@@ -241,7 +241,7 @@ if [[ $quickstart == "true" ]]; then
 
   info "Waiting for dependent pods to be up..."
   wait_for_pods_ready "--field-selector metadata.name=etcd"
-  wait_for_pods_ready "--field-selector metadata.name=minio"
+#  wait_for_pods_ready "--field-selector metadata.name=minio"
 fi
 
 # FVT resources
